@@ -8,6 +8,10 @@ target/
 /src/main/java (2).zip
 /src/main/java (3).zip
 
+### Generated / local data ###
+/input/
+/output/
+
 ### IntelliJ IDEA ###
 .idea/modules.xml
 .idea/jarRepositories.xml
