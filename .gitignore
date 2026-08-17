@@ -11,6 +11,7 @@ target/
 ### Generated / local data ###
 /input/
 /output/
+/output_bak/
 
 ### IntelliJ IDEA ###
 .idea/modules.xml
