@@ -29,7 +29,7 @@ See the [User Guide](docs/USER_GUIDE.md) for the complete list of registered set
    mvn compile
    ```
 2. Create an `input/` folder at the project root (see [User Guide § Input Files](docs/USER_GUIDE.md#input-files) for exact structure) containing:
-   - `pk.xlsx`, `fk.xlsx`, `columns.xlsx`, `triggers.xlsx` — schema metadata
+   - `pk.xlsx`, `fk.xlsx`, `columns.xlsx`, `triggers.xlsx` — schema metadata exported from Oracle for the tables the setups migrate (see [User Guide § Regenerating the metadata files from Oracle](docs/USER_GUIDE.md#regenerating-the-metadata-files-from-oracle) for ready-to-run queries scoped to exactly those tables)
    - `SourceData.xlsx`, `TargetData.xlsx` — the actual data to sync (one sheet per table)
 3. Open [`SetupRegistry.java`](src/main/java/com/strongcentsit/scriptcreator/config/SetupRegistry.java) and edit `ACTIVE_SETUPS` to list the setup name(s) you want to generate (see [User Guide § Choosing which setups run](docs/USER_GUIDE.md#choosing-which-setups-run)).
 4. Run the main feature:

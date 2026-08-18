@@ -12,6 +12,7 @@ This guide covers everything needed to run and configure Script Creator, even if
 - [Feature 2: Promo Queue Generator](#feature-2-promo-queue-generator)
 - [Feature 3: CSV → Excel Converter](#feature-3-csv--excel-converter)
 - [Input files](#input-files)
+- [Regenerating the metadata files from Oracle](#regenerating-the-metadata-files-from-oracle)
 - [Output files](#output-files)
 - [Configuration reference](#configuration-reference)
 - [Registered setups (reference table)](#registered-setups-reference-table)
@@ -173,17 +174,162 @@ String outputFile = "F:\\data migration\\prod_to_stg\\prod.xlsx";
 
 All files are `.xlsx`, read with Apache POI. Unless noted, the header row is row 1 and is skipped when reading data.
 
+### Schema metadata files (`pk.xlsx`, `fk.xlsx`, `columns.xlsx`, `triggers.xlsx`)
+
+These four describe the target database's schema and are typically exported straight from Oracle's data dictionary (see [Regenerating the metadata files from Oracle](#regenerating-the-metadata-files-from-oracle) below for ready-to-run queries). Each sheet's columns below are exactly what the generator reads — nothing more. Earlier versions of these files carried extra Oracle metadata (`COLUMN_ID`, `DATA_TYPE`, `DATA_LENGTH`, `DATA_PRECISION`, `DATA_SCALE`, `NULLABLE`, `POSITION`, `CONSTRAINT_NAME`, `TRIGGER_TYPE`, `TRIGGERING_EVENT`) that no code path in this project ever reads; those columns have been removed from the checked-in files to keep them focused on exactly what the tool consumes.
+
 | File | Columns (by position) |
 |---|---|
-| `input/columns.xlsx` | A: Table Name · B: Column Name |
-| `input/pk.xlsx` | A: Table Name · B: Primary Key Column Name |
-| `input/fk.xlsx` | A: Child Table · B: Child Column · C: Parent Table · D: Parent Column · E: FK Constraint Name |
-| `input/triggers.xlsx` (optional) | A: Table Name · B: Trigger Name · E: Status (only rows with status `ENABLED` are used) |
+| `input/columns.xlsx` | A: `TABLE_NAME` · B: `COLUMN_NAME` |
+| `input/pk.xlsx` | A: `TABLE_NAME` · B: `COLUMN_NAME` (the primary key column) |
+| `input/fk.xlsx` | A: `CHILD_TABLE` · B: `CHILD_COLUMN` · C: `PARENT_TABLE` · D: `PARENT_COLUMN` · E: `FK_NAME` |
+| `input/triggers.xlsx` (optional) | A: `TABLE_NAME` · B: `TRIGGER_NAME` · C: `STATUS` (only rows with status `ENABLED` are used) |
+
+> **Bug found and fixed while auditing these files' column usage:** `columns.xlsx` previously carried `COLUMN_ID` in column B and the real `COLUMN_NAME` in column C, but [`MetadataUtils.loadColumns`](../src/main/java/com/strongcentsit/scriptcreator/util/MetadataUtils.java) read column B expecting the column name — so every table's "known columns" set was actually populated with numeric column-order IDs, not real column names. The only consumer of that data, [`DataSheetValidator`](../src/main/java/com/strongcentsit/scriptcreator/util/DataSheetValidator.java)'s ≥80%-header-overlap fuzzy matching for truncated `SourceData.xlsx`/`TargetData.xlsx` sheet names, could therefore never actually match anything — a truncated sheet name always fell through to `[ERROR] Sheet '<name>' does not match schema metadata!` instead of being auto-corrected. Removing the unused `COLUMN_ID` column (so `COLUMN_NAME` now sits in column B, where the code already expected it) fixes this as a side effect of the column cleanup — no separate code change was needed for `columns.xlsx`. `triggers.xlsx` did need a code change: after dropping `TRIGGER_TYPE`/`TRIGGERING_EVENT`, `STATUS` moved from column E to column C, so `MetadataUtils.loadTriggers` was updated to read `getCell(2)` instead of `getCell(4)`.
+
+If you're maintaining these files locally, the pre-cleanup originals (with every Oracle column intact) are kept at `input/_backup_before_column_cleanup/` for reference — that folder isn't read by any code path.
+
+### Business/reference data files
+
+| File | Columns (by position) |
+|---|---|
 | `input/SourceData.xlsx` / `input/TargetData.xlsx` | One sheet per table; sheet name = table name; row 1 = column headers matching `columns.xlsx` |
 | `input/promo/source_products.xlsx` | A: Code · B: Name |
 | `input/promo/target_products.xlsx` | A: Code |
 
 **Sheet naming for `SourceData.xlsx` / `TargetData.xlsx`:** Excel sheet names are capped at 31 characters, so long table names get truncated. The tool tries to auto-resolve truncated names by matching ≥80% of the sheet's headers against a known table's columns, and logs a `[WARNING] Truncated sheet detected: ... -> Auto-corrected to: ...` when it does. Three known-truncated names are pre-registered in [`TableNameMapper`](../src/main/java/com/strongcentsit/scriptcreator/config/TableNameMapper.java) for `CALC_SCHEME_MARKUP_CROSS_COMPONENT_*` tables — if you add a table with a long name, you may need to register it there too, or rename its sheet manually. A sheet named exactly `SQL` is always ignored (used for a raw query dump if present).
+
+## Regenerating the metadata files from Oracle
+
+`pk.xlsx`, `fk.xlsx`, `columns.xlsx`, and `triggers.xlsx` describe whichever Oracle schema you're migrating *from* (the source environment) — the schema is assumed identical enough between source and target that one metadata export covers both. Run these against the source database, export each result set as a single-sheet `.xlsx` with the exact header row shown above, and drop it into `input/`.
+
+### 1. Which tables to include
+
+Rather than exporting the whole schema, scope every query below to just the tables these setups actually touch. The 20 distinct **main tables** registered across all 24 setups in [`SetupRegistry.java`](../src/main/java/com/strongcentsit/scriptcreator/config/SetupRegistry.java) are:
+
+```
+SUCC_ELIGIBILITY_RULE, CALC_SCHEME, ROUNDING_RULE, RATE_TOLERANCE_RULE, RES_AMDCNX_RULE,
+RES_DEPOSIT_RULE, RES_OPTION_RULE, H2H_SUP_BOARD_BASIS_MAPPING, MARKUP_VERSION,
+RES_ADV_NOTE_TYPE, RES_ADV_NOTE, CALC_RULE_EXPRESSION, REGION, COUNTRY, STATE, CITY,
+RESORT, AIRPORT, TOURIST_REGION, WS_FLIGHT_PRIORITY
+```
+
+Plus the **related tables** referenced explicitly in `SetupRegistry.java` via business keys, exclusion lists, target-only overrides, or FK remappings:
+
+```
+CALC_DOCUMENT_SCHEME, CALC_SCHEME_FEES_AND_TAXES, RES_AMDCNX_CHARGE, RES_AMD_CNXRULE_OPTION_STATUS,
+RES_DEPOSIT_CURRENCY_RULE, RES_DEPOSIT_CURRENCY_RULE_TYPE, RES_OPTION_DATE_RULE, CALC_SCHEME_MARKUP,
+CALC_RULE_GROUP, RES_ADV_NOTE_TEXT, RES_ADV_NOTE_HISTORY
+```
+
+That's not necessarily the *complete* set, though — at runtime, the generator also walks every table reachable from a setup's main table via `fk.xlsx` (e.g. `RES_SETUP_ASSIGNMENTS` under `RES_DEPOSIT_RULE`), and that full descendant tree isn't visible just by reading `SetupRegistry.java`. To discover it directly from the database, run this starting from the main-table list above (replace `<SCHEMA_OWNER>` with your schema):
+
+```sql
+WITH seed_tables (table_name) AS (
+    SELECT 'SUCC_ELIGIBILITY_RULE' FROM dual UNION ALL
+    SELECT 'CALC_SCHEME' FROM dual UNION ALL
+    SELECT 'ROUNDING_RULE' FROM dual UNION ALL
+    SELECT 'RATE_TOLERANCE_RULE' FROM dual UNION ALL
+    SELECT 'RES_AMDCNX_RULE' FROM dual UNION ALL
+    SELECT 'RES_DEPOSIT_RULE' FROM dual UNION ALL
+    SELECT 'RES_OPTION_RULE' FROM dual UNION ALL
+    SELECT 'H2H_SUP_BOARD_BASIS_MAPPING' FROM dual UNION ALL
+    SELECT 'MARKUP_VERSION' FROM dual UNION ALL
+    SELECT 'RES_ADV_NOTE_TYPE' FROM dual UNION ALL
+    SELECT 'RES_ADV_NOTE' FROM dual UNION ALL
+    SELECT 'CALC_RULE_EXPRESSION' FROM dual UNION ALL
+    SELECT 'REGION' FROM dual UNION ALL
+    SELECT 'COUNTRY' FROM dual UNION ALL
+    SELECT 'STATE' FROM dual UNION ALL
+    SELECT 'CITY' FROM dual UNION ALL
+    SELECT 'RESORT' FROM dual UNION ALL
+    SELECT 'AIRPORT' FROM dual UNION ALL
+    SELECT 'TOURIST_REGION' FROM dual UNION ALL
+    SELECT 'WS_FLIGHT_PRIORITY' FROM dual
+)
+SELECT DISTINCT LEVEL AS depth, PRIOR pk.table_name AS parent_table, fk.table_name AS child_table
+FROM all_constraints fk
+JOIN all_constraints pk
+  ON fk.r_constraint_name = pk.constraint_name
+ AND fk.r_owner = pk.owner
+WHERE fk.constraint_type = 'R'
+  AND fk.owner = '<SCHEMA_OWNER>'
+START WITH pk.table_name IN (SELECT table_name FROM seed_tables)
+CONNECT BY NOCYCLE PRIOR fk.table_name = pk.table_name
+ORDER BY depth, parent_table, child_table;
+```
+
+Union the `child_table` results with the seed list above to get the complete table list — that's what should go into every `IN (...)` clause below.
+
+### 2. `columns.xlsx`
+
+```sql
+SELECT table_name  AS "TABLE_NAME",
+       column_name AS "COLUMN_NAME"
+FROM all_tab_columns
+WHERE owner = '<SCHEMA_OWNER>'
+  AND table_name IN (<table list from step 1>)
+ORDER BY table_name, column_id;
+```
+
+### 3. `pk.xlsx`
+
+```sql
+SELECT acc.table_name  AS "TABLE_NAME",
+       acc.column_name AS "COLUMN_NAME"
+FROM all_constraints ac
+JOIN all_cons_columns acc
+  ON ac.constraint_name = acc.constraint_name
+ AND ac.owner = acc.owner
+WHERE ac.constraint_type = 'P'
+  AND ac.owner = '<SCHEMA_OWNER>'
+  AND ac.table_name IN (<table list from step 1>)
+ORDER BY acc.table_name, acc.position;
+```
+
+### 4. `fk.xlsx`
+
+```sql
+SELECT child_cons.table_name     AS "CHILD_TABLE",
+       child_cols.column_name    AS "CHILD_COLUMN",
+       parent_cons.table_name    AS "PARENT_TABLE",
+       parent_cols.column_name   AS "PARENT_COLUMN",
+       child_cons.constraint_name AS "FK_NAME"
+FROM all_constraints child_cons
+JOIN all_cons_columns child_cols
+  ON child_cons.constraint_name = child_cols.constraint_name
+ AND child_cons.owner = child_cols.owner
+JOIN all_constraints parent_cons
+  ON child_cons.r_constraint_name = parent_cons.constraint_name
+ AND child_cons.r_owner = parent_cons.owner
+JOIN all_cons_columns parent_cols
+  ON parent_cons.constraint_name = parent_cols.constraint_name
+ AND parent_cons.owner = parent_cols.owner
+ AND parent_cols.position = child_cols.position
+WHERE child_cons.constraint_type = 'R'
+  AND child_cons.owner = '<SCHEMA_OWNER>'
+  AND child_cons.table_name IN (<table list from step 1>)
+ORDER BY child_cons.table_name, child_cons.constraint_name, child_cols.position;
+```
+
+### 5. `triggers.xlsx`
+
+```sql
+SELECT table_name   AS "TABLE_NAME",
+       trigger_name AS "TRIGGER_NAME",
+       status       AS "STATUS"
+FROM all_triggers
+WHERE table_owner = '<SCHEMA_OWNER>'
+  AND table_name IN (<table list from step 1>)
+ORDER BY table_name, trigger_name;
+```
+
+### Updating the sheets
+
+1. Run each query in your Oracle client (SQL Developer, SQL*Plus, etc.) against the source environment.
+2. Export each result set to a single-sheet `.xlsx` with the header row exactly as shown (`TABLE_NAME`, `COLUMN_NAME`, etc. — the generator matches by position, not header text, but keeping real headers makes the file self-documenting).
+3. Replace the corresponding file in `input/` (`columns.xlsx`, `pk.xlsx`, `fk.xlsx`, `triggers.xlsx`).
+4. Re-run `SetupScriptGeneratorApp` (or `mvn compile exec:java`) — no code changes are needed as long as the column order in each file matches the table above.
 
 ## Output files
 

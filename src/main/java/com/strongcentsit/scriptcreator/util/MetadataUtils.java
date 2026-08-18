@@ -40,6 +40,7 @@ public class MetadataUtils {
         return metadataMap;
     }
 
+    // columns.xlsx layout: Col 0 = TABLE_NAME, Col 1 = COLUMN_NAME
     private static void loadColumns(String path, Map<String, TableSchemaMetadata> metadataMap) {
         DataFormatter formatter = new DataFormatter();
         try (InputStream is = getInputStream(path); Workbook wb = WorkbookFactory.create(is)) {
@@ -62,6 +63,7 @@ public class MetadataUtils {
         }
     }
 
+    // pk.xlsx layout: Col 0 = TABLE_NAME, Col 1 = COLUMN_NAME
     private static void loadPrimaryKeys(String path, Map<String, TableSchemaMetadata> metadataMap) {
         DataFormatter formatter = new DataFormatter();
         try (InputStream is = getInputStream(path); Workbook wb = WorkbookFactory.create(is)) {
@@ -84,6 +86,7 @@ public class MetadataUtils {
         }
     }
 
+    // fk.xlsx layout: Col 0 = CHILD_TABLE, Col 1 = CHILD_COLUMN, Col 2 = PARENT_TABLE, Col 3 = PARENT_COLUMN, Col 4 = FK_NAME
     private static void loadForeignKeys(String path, Map<String, TableSchemaMetadata> metadataMap) {
         DataFormatter formatter = new DataFormatter();
         try (InputStream is = getInputStream(path); Workbook wb = WorkbookFactory.create(is)) {
@@ -132,6 +135,7 @@ public class MetadataUtils {
     }
 
 
+    // triggers.xlsx layout: Col 0 = TABLE_NAME, Col 1 = TRIGGER_NAME, Col 2 = STATUS
     private static void loadTriggers(String path, Map<String, TableSchemaMetadata> metadataMap) {
         DataFormatter formatter = new DataFormatter();
         try (InputStream is = getInputStream(path); Workbook wb = WorkbookFactory.create(is)) {
@@ -143,7 +147,7 @@ public class MetadataUtils {
                 Row row = it.next();
                 String tableName   = sanitize(formatter.formatCellValue(row.getCell(0)));
                 String triggerName = sanitize(formatter.formatCellValue(row.getCell(1)));
-                String status      = sanitize(formatter.formatCellValue(row.getCell(4)));
+                String status      = sanitize(formatter.formatCellValue(row.getCell(2)));
 
                 if ("ENABLED".equalsIgnoreCase(status) && !tableName.isEmpty() && !triggerName.isEmpty()) {
                     TableSchemaMetadata meta = metadataMap.computeIfAbsent(tableName, TableSchemaMetadata::new);

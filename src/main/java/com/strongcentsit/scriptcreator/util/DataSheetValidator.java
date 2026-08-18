@@ -85,7 +85,6 @@ public class DataSheetValidator {
             String tableName = entry.getKey();
             TableSchemaMetadata meta = entry.getValue();
 
-            // FIX HERE: meta.getColumns() already returns Set<String>
             Set<String> knownColumns = meta.getColumns();
             if (knownColumns == null || knownColumns.isEmpty()) continue;
 
