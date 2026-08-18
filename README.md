@@ -12,6 +12,8 @@ For a full walkthrough of every feature, every input file format, and how to add
   - an `INSERT`/`UPDATE`/`DELETE` script per setup
   - a matching `_BACKUP.sql` script (snapshot the affected tables before running the main script)
   - a matching `_ROLLBACK.sql` script (restore from the backup and undo the change)
+  - one combined `Sequence_update.sql` per run, restarting every configured Oracle sequence past whatever the run inserted
+  - automatic remapping of lookup-table codes (e.g. a "product combination" ID) that differ between environments, before generating any SQL
 - **Promo Queue Generator** (`PromoQueueGeneratorApp`) — reads a list of source/target "products" and generates `INSERT` statements to enqueue a promotion job (with its steps and sub-steps) into `pp_promo_queue`.
 - **CSV → Excel converter** (`CsvToExcelConverter`) — a standalone helper for turning a folder of `SQL*Plus`-exported `.csv` files into the single multi-sheet `.xlsx` format the tool expects as input.
 

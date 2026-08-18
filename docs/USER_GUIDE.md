@@ -30,7 +30,7 @@ Instead of connecting to a live database, it works entirely from **Excel exports
 - Schema metadata (which columns exist, which are primary/foreign keys, which triggers are enabled) comes from `pk.xlsx`, `fk.xlsx`, `columns.xlsx`, `triggers.xlsx`.
 - The actual rows to compare come from `SourceData.xlsx` (the environment you're promoting *from*) and `TargetData.xlsx` (the environment you're promoting *to*), one sheet per table.
 
-Given those, it walks a catalog of ~24 named **setups** (e.g. "Finance - Deposit Rules", "Accounts - Single Use CC Eligibility"), compares source vs. target row-by-row using a configurable business key, and writes out ready-to-review SQL — plus a backup script to run first and a rollback script to run if you need to undo it. This is the tool's **main feature**, run via `SetupScriptGeneratorApp`.
+Given those, it walks a catalog of ~24 named **setups** (e.g. "Finance - Deposit Rules", "Accounts - Single Use CC Eligibility"), compares source vs. target row-by-row using a configurable business key, and writes out ready-to-review SQL — plus a backup script to run first, a rollback script to run if you need to undo it, and a combined script to restart any Oracle sequences past whatever the run just inserted. This is the tool's **main feature**, run via `SetupScriptGeneratorApp`.
 
 A second, unrelated feature (`PromoQueueGeneratorApp`) generates SQL for a promotion *job queue* table rather than the business data itself.
 
@@ -107,7 +107,9 @@ Neither entry point takes command-line arguments — all file paths are hardcode
 - `input/SourceData.xlsx`, `input/TargetData.xlsx` — the data to compare, one sheet per table
 
 ### What it does
-For every setup returned by `SetupRegistry.getAllActive()` (see [Choosing which setups run](#choosing-which-setups-run)):
+Once, before any setup runs: aligns any lookup tables registered in `GlobalBusinessKeyConfig` between source and target, then rewrites any `globalFkMappings`-declared columns in the source data to use target-side codes — see [GlobalBusinessKeyConfig + `.globalFkMappings(...)`](#globalbusinesskeyconfig--globalfkmappings---remapping-lookup-table-codes-between-environments).
+
+Then, for every setup returned by `SetupRegistry.getAllActive()` (see [Choosing which setups run](#choosing-which-setups-run)):
 
 1. Filters the setup's main table rows by its configured `conditions` (a simple equality filter, e.g. `SCHEME_TYPE = 'D'`).
 2. Matches source rows to target rows using the setup's `businessKeyColumns` (an exact match on one or more columns — can reference a related table via `ChildTable.Column`).
@@ -119,6 +121,8 @@ For every setup returned by `SetupRegistry.getAllActive()` (see [Choosing which 
 5. Wraps the whole script in `ALTER TRIGGER ... DISABLE` / `ENABLE` statements for any enabled trigger on an affected table, so business-rule triggers don't fire while the script runs.
 6. Applies a global set of column overrides to every insert/update — audit columns like `CREATED_BY`, `LAST_MODIFIED_DATE`, etc. are always set to fixed values (`codegen`, `SYSDATE`) rather than copied from source. See [ColumnOverrideConfig](#columnoverrideconfig).
 7. Writes three files per setup into `output/` (see [Output files](#output-files)).
+
+After every setup in the run has been processed: writes one combined `output/Sequence_update.sql` restarting every [`SequenceConfig`](#sequenceconfig-and-sequence_updatesql)-registered sequence whose table was touched, past the highest value the run inserted.
 
 ### `SyncMode`
 Each setup picks one of four strategies:
@@ -343,9 +347,11 @@ ORDER BY table_name, trigger_name;
 
 Setup names are sanitized into filenames by replacing anything that isn't a letter, digit, `-`, or `_` with `_` — e.g. `"Finance - Local Fee Schemes"` → `Finance_-_Local_Fee_Schemes.sql`.
 
+If any table with a sequence registered in [`SequenceConfig`](#sequenceconfig-and-sequence_updatesql) was touched by *any* setup in this run, one more file is written **once per run** (not per setup): `Sequence_update.sql`, restarting each affected sequence past every value the run inserted. See [SequenceConfig and Sequence_update.sql](#sequenceconfig-and-sequence_updatesql) below.
+
 **Promo pipeline** writes a single file: `output/promo/generated_promo_queue_inserts.sql` (no backup/rollback).
 
-> **Recommended run order:** review the `_BACKUP.sql`, run it → review the main `.sql`, run it → keep the `_ROLLBACK.sql` on hand in case you need to revert.
+> **Recommended run order:** review the `_BACKUP.sql` files, run them → review the main `.sql` files, run them → run `Sequence_update.sql` → keep the `_ROLLBACK.sql` files on hand in case you need to revert.
 
 `output/` (like `input/`) is gitignored, so generated SQL never gets committed to this repo — treat it as local/disposable and copy anything you need to keep elsewhere before re-running the generator.
 
@@ -400,14 +406,61 @@ CREATED_BY → 'codegen'
 ```
 To point these at a different user ID or change the environment tag, edit this file directly.
 
-### `GlobalBusinessKeyConfig`
-[`GlobalBusinessKeyConfig.java`](../src/main/java/com/strongcentsit/scriptcreator/config/GlobalBusinessKeyConfig.java) — registers business keys for tables that aren't a setup's own main table, but that other setups' data has foreign keys into (so those FK values can be remapped from source IDs to target IDs). Currently only `RES_ADV_NOTE_TYPE` (business key: `DESCRIPTION`) is registered.
+### `GlobalBusinessKeyConfig` + `.globalFkMappings(...)` — remapping lookup-table codes between environments
+
+Some columns hold a raw numeric code from a lookup/reference table (e.g. `RES_SETUP_ASSIGNMENTS.PRODUCT_COMBINATION`, referencing `PRODUCT_COMBINATION.COMBINATION_ID`) where **the ID for the same logical value differs between environments** — e.g. `CAR` is `COMBINATION_ID = 3` in source but `4` in target. This is usually *not* a declared foreign key (check `fk.xlsx` — there's no row for it), so nothing else in the tool knows to remap it, and copying the source code straight into target would silently point at the wrong thing.
+
+[`GlobalBusinessKeyConfig.java`](../src/main/java/com/strongcentsit/scriptcreator/config/GlobalBusinessKeyConfig.java) plus a setup's `.globalFkMappings(...)` builder option together solve this generically for any lookup table, any child column:
+
+```java
+// 1. GlobalBusinessKeyConfig.java — register the lookup table once, globally,
+//    with the column that identifies "the same value" across environments:
+register("PRODUCT_COMBINATION", List.of("NAME"));
+
+// 2. Any setup whose generated SQL writes to the child column declares the mapping:
+.globalFkMappings(Map.of(
+    "PRODUCT_COMBINATION", Set.of("RES_SETUP_ASSIGNMENTS.PRODUCT_COMBINATION")
+))
+```
+
+What this does, before any setup's SQL is generated:
+1. Matches every source `PRODUCT_COMBINATION` row to a target row by `NAME`, building a `sourceCOMBINATION_ID → targetCOMBINATION_ID` map (e.g. `3 → 4` for `CAR`).
+2. Rewrites `RES_SETUP_ASSIGNMENTS.PRODUCT_COMBINATION` in the **in-memory source data** for every row where the current value has a match in that map — before any setup reads it.
+
+This mutation happens once per run against the shared source data (not per setup), so it's enough to declare `.globalFkMappings(...)` on *any one* active setup that touches the child table — but since `RES_SETUP_ASSIGNMENTS` is shared across `Finance - Deposit Rules`, `Finance - Amd Cnx rules`, and `Finance - Option Rules` (confirmed via `fk.xlsx`: those are the only three main tables with an FK into it), and any of them can run alone depending on `ACTIVE_SETUPS`, the mapping is declared on **all three** so the remap always happens regardless of which subset is active.
+
+This was originally built for `RES_ADV_NOTE_TYPE` (business key `DESCRIPTION`, used by `Reservation - Advisory notes` / `Reservation - Rule Expression`) and is fully generic — `PRODUCT_COMBINATION` reuses the exact same mechanism, no code changes.
+
+**Prerequisite:** the lookup table needs the same three things as any table this tool touches — a primary key in `pk.xlsx` (`PRODUCT_COMBINATION` / `COMBINATION_ID`), an entry in `columns.xlsx` (`COMBINATION_ID`, `NAME`), and a `PRODUCT_COMBINATION` sheet in both `SourceData.xlsx` and `TargetData.xlsx`. None of these currently exist in this project's `input/` files — until they're added, `alignSourcePrimaryKeysWithTarget` finds no source/target rows for `PRODUCT_COMBINATION` and silently skips the remap (no error, no crash — but also no remapping). See [Regenerating the metadata files from Oracle](#regenerating-the-metadata-files-from-oracle) for how to pull this from Oracle.
+
+**To remap another lookup-coded column** (e.g. `RES_SETUP_ASSIGNMENTS.MARKETED_AS`, which *is* a declared FK to `EXPERIENCE_TYPE.EXP_TYPE_ID` per `fk.xlsx`, and could have the same cross-environment ID drift): register the lookup table in `GlobalBusinessKeyConfig` with whichever column uniquely identifies a row across environments, then add a `.globalFkMappings(...)` entry to every setup whose generated SQL writes to that child column.
 
 ### `TableNameMapper`
 [`TableNameMapper.java`](../src/main/java/com/strongcentsit/scriptcreator/config/TableNameMapper.java) — maps a truncated Excel sheet name to its real table name, for tables whose name exceeds Excel's 31-character sheet-name limit. Register a new mapping here if you add a long-named table and the automatic fuzzy-matching (see [Input files](#input-files)) doesn't resolve it correctly.
 
 ### `SetupConfigConstants`
 [`SetupConfigConstants.java`](../src/main/java/com/strongcentsit/scriptcreator/config/SetupConfigConstants.java) — `PK_SEQUENCE_OFFSET` (gap above the max target ID used when auto-computing a new starting ID, default 100), `MAX_SQL_IDENTIFIER_LENGTH` (30, Oracle's identifier length limit, used when naming `B_<table>` backup tables), and `DEFAULT_OUTPUT_FOLDER` (`"output/"`, used by `SetupScriptGeneratorApp`).
+
+### `SequenceConfig` and `Sequence_update.sql`
+
+New records the generator inserts get their primary key from `nextStartId`/`max(target)+100` (see [Feature 1](#feature-1-setup-script-generator)), **not** from the real Oracle sequence backing that column — so after applying the generated SQL, the sequence itself is still wherever it was and will hand out `NEXTVAL`s that can collide with what was just inserted. Some child tables make this worse: `RES_SETUP_ASSIGNMENTS.ASSIGNMENT_ID` is never remapped (see `remapAndInsertChild` in [`SetupScriptGenerator.java`](../src/main/java/com/strongcentsit/scriptcreator/util/SetupScriptGenerator.java)) — it's copied straight through from source, so it can easily exceed whatever the target's `RES_ASSIGNMENT_ID` sequence currently expects.
+
+[`SequenceConfig.java`](../src/main/java/com/strongcentsit/scriptcreator/config/SequenceConfig.java) is a global registry, `sequence, table, column`, mapping each sequence to the (table, column) it feeds — `register(table, column, sequenceName)`:
+
+```java
+register("RES_SETUP_ASSIGNMENTS", "ASSIGNMENT_ID", "RES_ASSIGNMENT_ID");
+register("RES_AMDCNX_RULE", "RULE_ID", "RES_AMDCNX_RULE_ID");
+register("RES_DEPOSIT_RULE", "RULE_ID", "RES_DEPOSIT_RULE_ID");
+```
+
+This is schema-level metadata (true regardless of which setups are active), so it's registered once globally rather than repeated per setup — add a line here for any other sequence-backed column you need tracked (e.g. `RES_OPTION_RULE`'s own sequence, once you know its real Oracle name; it isn't guessed here since getting it wrong would generate an `ALTER SEQUENCE` against a name that doesn't exist).
+
+**How the restart value is computed** — no manual arithmetic needed: a [`SequenceTracker`](../src/main/java/com/strongcentsit/scriptcreator/util/SequenceTracker.java) is created once per run (`generateAllSetups`, not per setup) and:
+1. For each setup, right after its affected-table set is known, it's seeded with the **current maximum value already in the target table** for every configured (table, column) pair whose table that setup touches.
+2. As the setup's `INSERT` statements are generated, every value actually written to a configured (table, column) — whether freshly assigned (e.g. a main table's new record) or copied straight through from source (e.g. `RES_SETUP_ASSIGNMENTS.ASSIGNMENT_ID`) — updates the running maximum for that sequence.
+3. After every setup in the run has been processed, one combined `output/Sequence_update.sql` is written (see [Output files](#output-files)) with `ALTER SEQUENCE <name> RESTART START WITH <max + 1>;` for every sequence that had any activity in this run.
+
+A sequence only appears in `Sequence_update.sql` if a setup in that run actually touched its table — an unrelated sequence registered here but never touched won't generate noise. Because the file is combined across the whole batch (not one per setup), a sequence backing a shared table like `RES_SETUP_ASSIGNMENTS` only needs restarting once even if several setups (`Finance - Deposit Rules`, `Finance - Amd Cnx rules`, `Finance - Option Rules`) wrote to it in the same run — it reflects the true maximum across all of them.
 
 ## Registered setups (reference table)
 
@@ -420,9 +473,9 @@ All 24 setups currently registered in `SetupRegistry`, in registration order. On
 | 3 | Finance - Rounding Rules Setup | `ROUNDING_RULE` | FULL_SYNC | |
 | 4 | Reservation - Tolerance setup | `RATE_TOLERANCE_RULE` | FULL_SYNC | |
 | 5 | Finance - Local Fee Schemes | `CALC_SCHEME` | FULL_SYNC | Orphans soft-deleted (`ACTIVE=0`) |
-| 6 | Finance - Amd Cnx rules | `RES_AMDCNX_RULE` | FULL_SYNC | New IDs start at 1800; orphans disabled via assignment removal on 3 tables (`orphanDeleteExclusions`) |
-| 7 | Finance - Deposit Rules | `RES_DEPOSIT_RULE` | FULL_SYNC | New IDs start at 1900; orphans disabled via assignment removal on 3 tables (`orphanDeleteExclusions`) |
-| 8 | Finance - Option Rules | `RES_OPTION_RULE` | FULL_SYNC | New IDs start at 1300; orphans disabled via assignment removal on 2 tables (`orphanDeleteExclusions`) |
+| 6 | Finance - Amd Cnx rules | `RES_AMDCNX_RULE` | FULL_SYNC | New IDs start at 1800; orphans disabled via assignment removal on 3 tables (`orphanDeleteExclusions`); `RES_SETUP_ASSIGNMENTS.PRODUCT_COMBINATION` codes remapped to target (`globalFkMappings`) |
+| 7 | Finance - Deposit Rules | `RES_DEPOSIT_RULE` | FULL_SYNC | New IDs start at 1900; orphans disabled via assignment removal on 3 tables (`orphanDeleteExclusions`); `RES_SETUP_ASSIGNMENTS.PRODUCT_COMBINATION` codes remapped to target (`globalFkMappings`) |
+| 8 | Finance - Option Rules | `RES_OPTION_RULE` | FULL_SYNC | New IDs start at 1300; orphans disabled via assignment removal on 2 tables (`orphanDeleteExclusions`); `RES_SETUP_ASSIGNMENTS.PRODUCT_COMBINATION` codes remapped to target (`globalFkMappings`) |
 | 9 | Calculation Scheme - Type X | `CALC_SCHEME` | FULL_SYNC | |
 | 10 | H2H setup - H2H Board Basis Mapping | `H2H_SUP_BOARD_BASIS_MAPPING` | FULL_SYNC | |
 | 11 | Markup - Rates | `MARKUP_VERSION` | FULL_SYNC | New IDs start at 68900; orphans soft-deleted |
@@ -476,6 +529,8 @@ private static final Set<String> ACTIVE_SETUPS = Set.of(
 - **A trigger fires unexpectedly when running the generated script** — the disable/enable bracketing only covers triggers marked `ENABLED` in `triggers.xlsx` at generation time; if `triggers.xlsx` is stale or missing that trigger, it won't be included.
 - **`mvn exec:java` fails to find a main class** — pass it explicitly, e.g. `-Dexec.mainClass=com.strongcentsit.scriptcreator.promo.PromoQueueGeneratorApp`, or run from an IDE instead (see [Running the tool](#running-the-tool)).
 - **Generated `UPDATE EXISTING RECORD` block deletes a child table's rows fine but then fails to re-insert them (unique/primary-key constraint violation)** — a table listed in `.tableOperationExclusions(..., Set.of("DELETE"))` was meant to be spared only when *removing an orphaned (target-only) record*, but that exclusion also suppresses the delete-then-reinsert refresh a matched record's children go through on `UPDATE`, so stale rows are left behind before the `INSERT` runs. Move that table from `.tableOperationExclusions` to `.orphanDeleteExclusions` instead — see the warning under [Configuration reference](#configuration-reference). This was the root cause of exactly this failure in the `Finance - Deposit Rules` / `Finance - Amd Cnx rules` / `Finance - Option Rules` setups and has been fixed by switching them to `orphanDeleteExclusions`.
+- **`Sequence_update.sql` wasn't generated, or is missing a sequence you expected** — it's only written if at least one configured sequence's table was touched by a setup in that run; check the table is registered in `SequenceConfig` and that a setup touching it was actually in `ACTIVE_SETUPS`. See [SequenceConfig and Sequence_update.sql](#sequenceconfig-and-sequence_updatesql).
+- **Running the generated SQL, a value in a lookup-coded column (e.g. `PRODUCT_COMBINATION`) ends up pointing at the wrong thing in target** — the remap only activates once the lookup table has a PK in `pk.xlsx`, an entry in `columns.xlsx`, and a same-named sheet in both `SourceData.xlsx`/`TargetData.xlsx`; missing any of those, `alignSourcePrimaryKeysWithTarget` silently finds no rows to match and skips the remap without an error. See the prerequisite note under [GlobalBusinessKeyConfig + `.globalFkMappings(...)`](#globalbusinesskeyconfig--globalfkmappings---remapping-lookup-table-codes-between-environments).
 
 ## Known limitations / dead code
 

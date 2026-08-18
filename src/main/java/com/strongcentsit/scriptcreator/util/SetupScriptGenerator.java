@@ -37,9 +37,13 @@ public class SetupScriptGenerator {
         // PRE-PASS 2: Remap Foreign Key columns using rules defined in SetupConfigs
         applyGlobalFkRemappings(configs, sourceDataMap, globalPkMap);
 
+        SequenceTracker sequenceTracker = new SequenceTracker();
+
         for (SetupConfig config : configs) {
-            generateScriptForSetup(config, sourceDataMap, targetDataMap, metadataMap, outputFolderPath);
+            generateScriptForSetup(config, sourceDataMap, targetDataMap, metadataMap, outputFolderPath, sequenceTracker);
         }
+
+        writeSequenceUpdateScript(outputFolderPath, sequenceTracker);
     }
 
     public static void generateScriptForSetup(
@@ -47,7 +51,8 @@ public class SetupScriptGenerator {
             Map<String, List<Map<String, Object>>> sourceDataMap,
             Map<String, List<Map<String, Object>>> targetDataMap,
             Map<String, TableSchemaMetadata> metadataMap,
-            String outputFolderPath) {
+            String outputFolderPath,
+            SequenceTracker sequenceTracker) {
 
         System.out.println("Processing setup: [" + config.getSetupName() + "]...");
 
@@ -81,6 +86,8 @@ public class SetupScriptGenerator {
 
         preCollectAffectedTables(config, sourceEntries, targetEntries, sourceDataMap, targetDataMap, metadataMap, affectedTables);
 
+        if (sequenceTracker != null) sequenceTracker.seedForTables(affectedTables, targetDataMap);
+
         // Collect and disable triggers
         List<String> triggersToToggle = collectTriggersForTables(affectedTables, metadataMap);
         appendDisableTriggersSection(mainSqlBuilder, triggersToToggle);
@@ -101,7 +108,7 @@ public class SetupScriptGenerator {
                             .append(" ---\n");
 
                     mainSqlBuilder.append(SqlScriptUtils.generateFlatInsertScript(
-                            config.getMainTable(), sourceRow, config));
+                            config.getMainTable(), sourceRow, config, sequenceTracker));
                     missingCount++;
                 }
             }
@@ -187,7 +194,7 @@ public class SetupScriptGenerator {
 
                     sourceTree.getChildrenMap().forEach((childTable, childNodes) -> {
                         for (EntityNode child : childNodes) {
-                            remapAndInsertChild(child, pkColumn, originalSourcePk, targetPkValue, mainSqlBuilder, config);
+                            remapAndInsertChild(child, pkColumn, originalSourcePk, targetPkValue, mainSqlBuilder, config, sequenceTracker);
                         }
                     });
                 }
@@ -210,11 +217,11 @@ public class SetupScriptGenerator {
                     newMainData.put(pkColumn, newPkValue);
                     EntityNode newMainNode = new EntityNode(config.getMainTable(), newMainData);
 
-                    mainSqlBuilder.append(SqlScriptUtils.generateInsertScript(newMainNode, config));
+                    mainSqlBuilder.append(SqlScriptUtils.generateInsertScript(newMainNode, config, sequenceTracker));
 
                     sourceTree.getChildrenMap().forEach((childTable, childNodes) -> {
                         for (EntityNode child : childNodes) {
-                            remapAndInsertChild(child, pkColumn, originalSourcePk, newPkValue, mainSqlBuilder, config);
+                            remapAndInsertChild(child, pkColumn, originalSourcePk, newPkValue, mainSqlBuilder, config, sequenceTracker);
                         }
                     });
                 }
@@ -357,7 +364,8 @@ public class SetupScriptGenerator {
             Object oldPk,
             Object newPk,
             StringBuilder sql,
-            SetupConfig config) {
+            SetupConfig config,
+            SequenceTracker sequenceTracker) {
 
         Map<String, Object> remappedData = new LinkedHashMap<>(node.getData());
 
@@ -371,11 +379,11 @@ public class SetupScriptGenerator {
         });
 
         EntityNode remappedNode = new EntityNode(node.getTableName(), remappedData);
-        sql.append(SqlScriptUtils.generateInsertScript(remappedNode, config));
+        sql.append(SqlScriptUtils.generateInsertScript(remappedNode, config, sequenceTracker));
 
         node.getChildrenMap().forEach((childTable, childNodes) -> {
             for (EntityNode child : childNodes) {
-                remapAndInsertChild(child, pkColumn, oldPk, newPk, sql, config);
+                remapAndInsertChild(child, pkColumn, oldPk, newPk, sql, config, sequenceTracker);
             }
         });
     }
@@ -398,6 +406,17 @@ public class SetupScriptGenerator {
 
         String rollbackSql = buildRollbackScript(config, affectedTables);
         writeSqlToFile(outputFolderPath, baseFileName + "_ROLLBACK.sql", rollbackSql);
+    }
+
+    /**
+     * Writes one combined sequence-restart script for the whole batch (not per setup),
+     * since a sequence tied to a shared table (e.g. RES_SETUP_ASSIGNMENTS) can be
+     * touched by several setups in the same run and only needs restarting once, past
+     * the highest value any of them wrote.
+     */
+    private static void writeSequenceUpdateScript(String outputFolderPath, SequenceTracker sequenceTracker) {
+        if (sequenceTracker == null || sequenceTracker.isEmpty()) return;
+        writeSqlToFile(outputFolderPath, "Sequence_update.sql", sequenceTracker.buildRestartScript());
     }
 
     private static String buildBackupScript(SetupConfig config, Set<String> affectedTables) {

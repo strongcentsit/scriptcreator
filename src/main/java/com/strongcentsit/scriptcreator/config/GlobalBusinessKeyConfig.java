@@ -10,6 +10,7 @@ public class GlobalBusinessKeyConfig {
 
     static {
         register("RES_ADV_NOTE_TYPE", List.of("DESCRIPTION"));
+        register("PRODUCT_COMBINATION", List.of("NAME"));
     }
 
     public static void register(String tableName, List<String> businessKeys) {

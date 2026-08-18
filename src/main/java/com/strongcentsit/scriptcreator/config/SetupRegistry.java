@@ -57,6 +57,13 @@ public class SetupRegistry {
                         "RES_AMD_CNXRULE_OPTION_STATUS",
                         "RES_AMDCNX_RULE"
                 ))
+                // RES_SETUP_ASSIGNMENTS.PRODUCT_COMBINATION is a code, not a declared FK
+                // (see fk.xlsx), and PRODUCT_COMBINATION.COMBINATION_ID differs between
+                // environments for the same NAME -- remap source values to the target's
+                // ID before generating, via PRODUCT_COMBINATION's business key (NAME).
+                .globalFkMappings(Map.of(
+                        "PRODUCT_COMBINATION", Set.of("RES_SETUP_ASSIGNMENTS.PRODUCT_COMBINATION")
+                ))
                 .nextStartId(1800L)
                 .build());
 
@@ -71,6 +78,10 @@ public class SetupRegistry {
                         "RES_DEPOSIT_CURRENCY_RULE",
                         "RES_DEPOSIT_CURRENCY_RULE_TYPE"
                 ))
+                // See the same note on "Finance - Amd Cnx rules" above.
+                .globalFkMappings(Map.of(
+                        "PRODUCT_COMBINATION", Set.of("RES_SETUP_ASSIGNMENTS.PRODUCT_COMBINATION")
+                ))
                 .nextStartId(1900L)
                 .build());
 
@@ -83,6 +94,10 @@ public class SetupRegistry {
                 .orphanDeleteExclusions(Set.of(
                         "RES_OPTION_DATE_RULE",
                         "RES_OPTION_RULE"
+                ))
+                // See the same note on "Finance - Amd Cnx rules" above.
+                .globalFkMappings(Map.of(
+                        "PRODUCT_COMBINATION", Set.of("RES_SETUP_ASSIGNMENTS.PRODUCT_COMBINATION")
                 ))
                 .nextStartId(1300L)
                 .build());

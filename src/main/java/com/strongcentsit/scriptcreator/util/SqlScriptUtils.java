@@ -20,13 +20,13 @@ public class SqlScriptUtils {
     // 1. INSERT SCRIPT GENERATION
     // =========================================================================
 
-    public static String generateInsertScript(EntityNode node, SetupConfig config) {
+    public static String generateInsertScript(EntityNode node, SetupConfig config, SequenceTracker sequenceTracker) {
         StringBuilder sql = new StringBuilder();
-        generateInsertRecursive(node, config, sql);
+        generateInsertRecursive(node, config, sql, sequenceTracker);
         return sql.toString();
     }
 
-    private static void generateInsertRecursive(EntityNode node, SetupConfig config, StringBuilder sql) {
+    private static void generateInsertRecursive(EntityNode node, SetupConfig config, StringBuilder sql, SequenceTracker sequenceTracker) {
         if (node == null) return;
 
         String tableName = node.getTableName();
@@ -48,6 +48,7 @@ public class SqlScriptUtils {
                     if (finalVal != null) {
                         columns.add(col);
                         values.add(formatSqlValue(finalVal));
+                        if (sequenceTracker != null) sequenceTracker.observe(tableName, col, finalVal);
                     }
                 }
 
@@ -59,7 +60,7 @@ public class SqlScriptUtils {
 
         node.getChildrenMap().forEach((childTable, childNodes) -> {
             for (EntityNode child : childNodes) {
-                generateInsertRecursive(child, config, sql);
+                generateInsertRecursive(child, config, sql, sequenceTracker);
             }
         });
     }
@@ -228,7 +229,8 @@ public class SqlScriptUtils {
     public static String generateFlatInsertScript(
             String tableName,
             Map<String, Object> rowData,
-            SetupConfig config) {
+            SetupConfig config,
+            SequenceTracker sequenceTracker) {
 
         if (rowData == null || rowData.isEmpty()) return "";
 
@@ -250,6 +252,7 @@ public class SqlScriptUtils {
             if (finalVal != null) {
                 columns.add(col);
                 values.add(formatSqlValue(finalVal));
+                if (sequenceTracker != null) sequenceTracker.observe(tableName, col, finalVal);
             }
         }
 
