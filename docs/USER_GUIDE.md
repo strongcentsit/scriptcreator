@@ -218,9 +218,10 @@ new SetupConfig.Builder("Finance - Deposit Rules", "RES_DEPOSIT_RULE")
     .businessKeyColumns(List.of("CODE"))
     .syncMode(SyncMode.FULL_SYNC)
     .nextStartId(1900L)
-    .tableOperationExclusions(Map.of(
-        "RES_DEPOSIT_RULE", Set.of("DELETE"),
-        "RES_DEPOSIT_CURRENCY_RULE", Set.of("DELETE")
+    .orphanDeleteExclusions(Set.of(
+        "RES_DEPOSIT_RULE",
+        "RES_DEPOSIT_CURRENCY_RULE",
+        "RES_DEPOSIT_CURRENCY_RULE_TYPE"
     ))
     .build()
 ```
@@ -235,9 +236,12 @@ Available builder options:
 | `.nextStartId(Long)` | Starting primary key for newly inserted records. If omitted, it's computed as `max(existing target PK) + 100`. |
 | `.customOverrides(Map<String,Object>)` | Extra column-value overrides for this setup only, layered on top of the global overrides below. |
 | `.targetOnlyOverrides(Map<String, Map<String,Object>>)` | Instead of hard-deleting an orphaned target record, update it with these column values (a soft delete) — e.g. `Map.of("CALC_SCHEME", Map.of("ACTIVE", 0))`. |
-| `.tableOperationExclusions(Map<String, Set<String>>)` | Suppress specific SQL operations (`INSERT`, `UPDATE`, `DELETE`, or `ALL`) for a table, e.g. never delete `RES_DEPOSIT_RULE` rows. |
+| `.tableOperationExclusions(Map<String, Set<String>>)` | Suppress specific SQL operations (`INSERT`, `UPDATE`, `DELETE`, or `ALL`) for a table, **in every scenario the generator emits SQL for it** — matched-record updates included. See the warning below before using this for a DELETE-only exclusion. |
+| `.orphanDeleteExclusions(Set<String>)` | Spares these tables from physical `DELETE` **only** when removing an orphaned (target-only) record tree — e.g. "disable" a rule by deleting just its `RES_SETUP_ASSIGNMENTS` row instead of the whole rule. Does not affect the delete-then-reinsert refresh of a matched record's children on `UPDATE`. See below. |
 | `.globalFkMappings(Map<String, Set<String>>)` | Declares that a foreign key on a child table (`"ChildTable.Column"`) points at a table registered in `GlobalBusinessKeyConfig`, so its value gets remapped from the source PK to the target PK before syncing. |
 | `.enabled(boolean)` | Present on the builder but **not currently checked anywhere** — has no effect. Use `ACTIVE_SETUPS` in `SetupRegistry` to enable/disable a setup instead. |
+
+> **`tableOperationExclusions` vs. `orphanDeleteExclusions` — use the right one.** A `DELETE` entry in `tableOperationExclusions` suppresses that table's `DELETE` statements *everywhere*, including the delete-then-reinsert refresh a matched (`FULL_SYNC`/`UPSERT_ONLY`) record's child rows go through on `UPDATE`. If you put a table there to implement a "disable instead of delete" behavior for orphaned (target-only) records, you will also silently skip the cleanup delete on ordinary updates — the following `INSERT` then fails with a primary-key collision, because the old rows for that record were never removed. Use `orphanDeleteExclusions` instead: it only takes effect for orphan removal (Step 1), so matched-record refreshes on `UPDATE` still delete and reinsert those tables correctly. Reserve `tableOperationExclusions` for tables a setup should *never* touch at all (e.g. `Set.of("ALL")` because another setup, or a separate process, owns them).
 
 ### `ColumnOverrideConfig`
 [`ColumnOverrideConfig.java`](../src/main/java/com/strongcentsit/scriptcreator/config/ColumnOverrideConfig.java) — column names that get their value replaced automatically on every insert/update, across every setup, regardless of what's in the source data. Mostly audit columns:
@@ -270,9 +274,9 @@ All 24 setups currently registered in `SetupRegistry`, in registration order. On
 | 3 | Finance - Rounding Rules Setup | `ROUNDING_RULE` | FULL_SYNC | |
 | 4 | Reservation - Tolerance setup | `RATE_TOLERANCE_RULE` | FULL_SYNC | |
 | 5 | Finance - Local Fee Schemes | `CALC_SCHEME` | FULL_SYNC | Orphans soft-deleted (`ACTIVE=0`) |
-| 6 | Finance - Amd Cnx rules | `RES_AMDCNX_RULE` | FULL_SYNC | New IDs start at 1800; deletes suppressed on 3 tables |
-| 7 | Finance - Deposit Rules | `RES_DEPOSIT_RULE` | FULL_SYNC | New IDs start at 1900; deletes suppressed on 3 tables |
-| 8 | Finance - Option Rules | `RES_OPTION_RULE` | FULL_SYNC | New IDs start at 1300; deletes suppressed on 2 tables |
+| 6 | Finance - Amd Cnx rules | `RES_AMDCNX_RULE` | FULL_SYNC | New IDs start at 1800; orphans disabled via assignment removal on 3 tables (`orphanDeleteExclusions`) |
+| 7 | Finance - Deposit Rules | `RES_DEPOSIT_RULE` | FULL_SYNC | New IDs start at 1900; orphans disabled via assignment removal on 3 tables (`orphanDeleteExclusions`) |
+| 8 | Finance - Option Rules | `RES_OPTION_RULE` | FULL_SYNC | New IDs start at 1300; orphans disabled via assignment removal on 2 tables (`orphanDeleteExclusions`) |
 | 9 | Calculation Scheme - Type X | `CALC_SCHEME` | FULL_SYNC | |
 | 10 | H2H setup - H2H Board Basis Mapping | `H2H_SUP_BOARD_BASIS_MAPPING` | FULL_SYNC | |
 | 11 | Markup - Rates | `MARKUP_VERSION` | FULL_SYNC | New IDs start at 68900; orphans soft-deleted |
@@ -325,6 +329,7 @@ private static final Set<String> ACTIVE_SETUPS = Set.of(
 - **Wrong starting ID for new records** — check whether the setup has an explicit `.nextStartId(...)`; if not, it's computed as `max(target PK) + 100`, which depends entirely on what's in `TargetData.xlsx` at generation time.
 - **A trigger fires unexpectedly when running the generated script** — the disable/enable bracketing only covers triggers marked `ENABLED` in `triggers.xlsx` at generation time; if `triggers.xlsx` is stale or missing that trigger, it won't be included.
 - **`mvn exec:java` fails to find a main class** — pass it explicitly, e.g. `-Dexec.mainClass=com.strongcentsit.scriptcreator.promo.PromoQueueGeneratorApp`, or run from an IDE instead (see [Running the tool](#running-the-tool)).
+- **Generated `UPDATE EXISTING RECORD` block deletes a child table's rows fine but then fails to re-insert them (unique/primary-key constraint violation)** — a table listed in `.tableOperationExclusions(..., Set.of("DELETE"))` was meant to be spared only when *removing an orphaned (target-only) record*, but that exclusion also suppresses the delete-then-reinsert refresh a matched record's children go through on `UPDATE`, so stale rows are left behind before the `INSERT` runs. Move that table from `.tableOperationExclusions` to `.orphanDeleteExclusions` instead — see the warning under [Configuration reference](#configuration-reference). This was the root cause of exactly this failure in the `Finance - Deposit Rules` / `Finance - Amd Cnx rules` / `Finance - Option Rules` setups and has been fixed by switching them to `orphanDeleteExclusions`.
 
 ## Known limitations / dead code
 

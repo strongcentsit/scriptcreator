@@ -14,6 +14,7 @@ public class SetupConfig {
     private final Map<String, Object> columnOverrides;
     private final Map<String, Map<String, Object>> targetOnlyOverrides;
     private final Map<String, Set<String>> tableOperationExclusions;
+    private final Set<String> orphanDeleteExclusions;
 
     // NEW: Foreign key remappings defined at SetupConfig level
     // Map<ParentTableName, Set<ChildTableAndColumn>> e.g., "RES_ADV_NOTE_TYPE" -> Set("RES_ADV_NOTE.TYPE")
@@ -61,6 +62,15 @@ public class SetupConfig {
         }
         this.tableOperationExclusions = Collections.unmodifiableMap(normalizedExclusions);
 
+        // Orphan Delete Exclusions (see isOrphanDeleteExcluded for semantics)
+        Set<String> normalizedOrphanExclusions = new LinkedHashSet<>();
+        if (builder.orphanDeleteExclusions != null) {
+            for (String table : builder.orphanDeleteExclusions) {
+                if (table != null) normalizedOrphanExclusions.add(table.toUpperCase().trim());
+            }
+        }
+        this.orphanDeleteExclusions = Collections.unmodifiableSet(normalizedOrphanExclusions);
+
         // FK Remappings
         Map<String, Set<String>> normalizedFkMappings = new LinkedHashMap<>();
         if (builder.globalFkMappings != null) {
@@ -91,6 +101,7 @@ public class SetupConfig {
     public Map<String, Object> getColumnOverrides() { return columnOverrides; }
     public Map<String, Map<String, Object>> getTargetOnlyOverrides() { return targetOnlyOverrides; }
     public Map<String, Set<String>> getTableOperationExclusions() { return tableOperationExclusions; }
+    public Set<String> getOrphanDeleteExclusions() { return orphanDeleteExclusions; }
     public Map<String, Set<String>> getGlobalFkMappings() { return globalFkMappings; }
 
     public Map<String, Object> getTargetOnlyOverridesForTable(String tableName) {
@@ -108,6 +119,20 @@ public class SetupConfig {
         return excludedOps.contains("ALL") || excludedOps.contains(opUpper);
     }
 
+    /**
+     * Tables listed here are only spared from physical DELETE when a target record has no
+     * matching source record (the "orphan" / target-only case) — e.g. to disable a rule by
+     * removing just its assignment row instead of deleting the whole record tree. This is
+     * intentionally separate from {@link #isOperationSkipped}, which also governs DELETEs
+     * issued while refreshing a matched record's child rows (delete-then-reinsert on UPDATE);
+     * applying an orphan-only exclusion there would skip the delete but not the following
+     * insert, causing a primary-key collision.
+     */
+    public boolean isOrphanDeleteExcluded(String tableName) {
+        if (tableName == null) return false;
+        return orphanDeleteExclusions.contains(tableName.toUpperCase().trim());
+    }
+
     public String getOutputFileName() {
         return setupName.replaceAll("[^a-zA-Z0-9\\-_]", "_").replaceAll("_+", "_") + ".sql";
     }
@@ -123,6 +148,7 @@ public class SetupConfig {
         private Map<String, Object> customOverrides = Map.of();
         private Map<String, Map<String, Object>> targetOnlyOverrides = Map.of();
         private Map<String, Set<String>> tableOperationExclusions = Map.of();
+        private Set<String> orphanDeleteExclusions = Set.of();
         private Map<String, Set<String>> globalFkMappings = Map.of();
 
         public Builder(String setupName, String mainTable) {
@@ -173,6 +199,18 @@ public class SetupConfig {
 
         public Builder tableOperationExclusions(Map<String, Set<String>> tableOperationExclusions) {
             if (tableOperationExclusions != null) this.tableOperationExclusions = tableOperationExclusions;
+            return this;
+        }
+
+        /**
+         * Tables to spare from physical DELETE only when removing an orphaned (target-only)
+         * record tree — e.g. to disable a rule via its assignment rows instead of deleting the
+         * rule itself. Does not affect the delete-then-reinsert refresh of a matched record's
+         * children on UPDATE; use {@link #tableOperationExclusions} for an exclusion that must
+         * apply everywhere.
+         */
+        public Builder orphanDeleteExclusions(Set<String> orphanDeleteExclusions) {
+            if (orphanDeleteExclusions != null) this.orphanDeleteExclusions = orphanDeleteExclusions;
             return this;
         }
 

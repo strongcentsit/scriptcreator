@@ -136,7 +136,7 @@ public class SetupScriptGenerator {
 
                         List<EntityNode> targetTrees = DataQueryUtils.getNestedTree(targetDataMap, List.of(targetRow), metadataMap, config.getMainTable());
                         if (!targetTrees.isEmpty()) {
-                            mainSqlBuilder.append(SqlScriptUtils.generateDeleteScript(targetTrees.get(0), metadataMap, config));
+                            mainSqlBuilder.append(SqlScriptUtils.generateOrphanDeleteScript(targetTrees.get(0), metadataMap, config));
                         }
                     }
                 }

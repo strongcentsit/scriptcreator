@@ -160,22 +160,40 @@ public class SqlScriptUtils {
 
     public static String generateDeleteScript(EntityNode node, Map<String, TableSchemaMetadata> metadataMap, SetupConfig config) {
         StringBuilder sql = new StringBuilder();
-        generateDeleteRecursive(node, metadataMap, config, sql);
+        generateDeleteRecursive(node, metadataMap, config, sql, false);
         return sql.toString();
     }
 
-    private static void generateDeleteRecursive(EntityNode node, Map<String, TableSchemaMetadata> metadataMap, SetupConfig config, StringBuilder sql) {
+    /**
+     * Same as {@link #generateDeleteScript}, but additionally honors
+     * {@link SetupConfig#isOrphanDeleteExcluded}. Use this only when deleting an orphaned
+     * (target-only) record tree — never for the delete-then-reinsert refresh of a matched
+     * record's children on UPDATE, since skipping that delete would leave stale rows behind
+     * and the following INSERT would then fail on a primary-key collision.
+     */
+    public static String generateOrphanDeleteScript(EntityNode node, Map<String, TableSchemaMetadata> metadataMap, SetupConfig config) {
+        StringBuilder sql = new StringBuilder();
+        generateDeleteRecursive(node, metadataMap, config, sql, true);
+        return sql.toString();
+    }
+
+    private static void generateDeleteRecursive(EntityNode node, Map<String, TableSchemaMetadata> metadataMap, SetupConfig config, StringBuilder sql, boolean orphanContext) {
         if (node == null) return;
 
         node.getChildrenMap().forEach((childTable, childNodes) -> {
             for (EntityNode child : childNodes) {
-                generateDeleteRecursive(child, metadataMap, config, sql);
+                generateDeleteRecursive(child, metadataMap, config, sql, orphanContext);
             }
         });
 
         String tableName = node.getTableName();
 
-        if (config == null || !config.isOperationSkipped(tableName, "DELETE")) {
+        boolean skipped = config != null && (
+                config.isOperationSkipped(tableName, "DELETE")
+                        || (orphanContext && config.isOrphanDeleteExcluded(tableName))
+        );
+
+        if (!skipped) {
             Map<String, Object> data = node.getData();
             List<String> pkColumns = getPrimaryKeys(tableName, metadataMap);
 

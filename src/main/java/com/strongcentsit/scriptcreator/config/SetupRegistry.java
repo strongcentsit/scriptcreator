@@ -49,10 +49,13 @@ public class SetupRegistry {
         register(new SetupConfig.Builder("Finance - Amd Cnx rules", "RES_AMDCNX_RULE")
                 .businessKeyColumns(List.of("RULE_REF", "DESCRIPTION"))
                 .syncMode(SyncMode.FULL_SYNC)
-                .tableOperationExclusions(Map.of(
-                        "RES_AMDCNX_CHARGE", Set.of("DELETE"),
-                        "RES_AMD_CNXRULE_OPTION_STATUS", Set.of("DELETE"),
-                        "RES_AMDCNX_RULE", Set.of("DELETE")
+                // Orphan (target-only) records are disabled via their RES_SETUP_ASSIGNMENTS
+                // row rather than deleted outright; matched-record child refreshes on UPDATE
+                // still delete-then-reinsert these tables normally (see SetupConfig.orphanDeleteExclusions).
+                .orphanDeleteExclusions(Set.of(
+                        "RES_AMDCNX_CHARGE",
+                        "RES_AMD_CNXRULE_OPTION_STATUS",
+                        "RES_AMDCNX_RULE"
                 ))
                 .nextStartId(1800L)
                 .build());
@@ -60,10 +63,13 @@ public class SetupRegistry {
         register(new SetupConfig.Builder("Finance - Deposit Rules", "RES_DEPOSIT_RULE")
                 .businessKeyColumns(List.of("CODE"))
                 .syncMode(SyncMode.FULL_SYNC)
-                .tableOperationExclusions(Map.of(
-                        "RES_DEPOSIT_RULE", Set.of("DELETE"),
-                        "RES_DEPOSIT_CURRENCY_RULE", Set.of("DELETE"),
-                        "RES_DEPOSIT_CURRENCY_RULE_TYPE", Set.of("DELETE")
+                // Orphan (target-only) records are disabled via their RES_SETUP_ASSIGNMENTS
+                // row rather than deleted outright; matched-record child refreshes on UPDATE
+                // still delete-then-reinsert these tables normally (see SetupConfig.orphanDeleteExclusions).
+                .orphanDeleteExclusions(Set.of(
+                        "RES_DEPOSIT_RULE",
+                        "RES_DEPOSIT_CURRENCY_RULE",
+                        "RES_DEPOSIT_CURRENCY_RULE_TYPE"
                 ))
                 .nextStartId(1900L)
                 .build());
@@ -71,9 +77,12 @@ public class SetupRegistry {
         register(new SetupConfig.Builder("Finance - Option Rules", "RES_OPTION_RULE")
                 .businessKeyColumns(List.of("REFERENCE"))
                 .syncMode(SyncMode.FULL_SYNC)
-                .tableOperationExclusions(Map.of(
-                        "RES_OPTION_DATE_RULE", Set.of("DELETE"),
-                        "RES_OPTION_RULE", Set.of("DELETE")
+                // Orphan (target-only) records are disabled via their RES_SETUP_ASSIGNMENTS
+                // row rather than deleted outright; matched-record child refreshes on UPDATE
+                // still delete-then-reinsert these tables normally (see SetupConfig.orphanDeleteExclusions).
+                .orphanDeleteExclusions(Set.of(
+                        "RES_OPTION_DATE_RULE",
+                        "RES_OPTION_RULE"
                 ))
                 .nextStartId(1300L)
                 .build());
