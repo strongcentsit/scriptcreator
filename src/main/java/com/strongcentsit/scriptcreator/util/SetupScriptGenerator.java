@@ -295,8 +295,17 @@ public class SetupScriptGenerator {
     }
 
     /**
-     * Collects all globalFkMappings defined across provided SetupConfigs and updates
-     * Foreign Key columns in sourceDataMap using globalPkMap.
+     * Collects every child-column -> parent-table remapping in scope for this run and
+     * rewrites those columns in sourceDataMap using globalPkMap. Two sources feed this,
+     * merged together:
+     * <ol>
+     *   <li>{@link GlobalBusinessKeyConfig#getAllChildColumnMappings()} -- applies
+     *       unconditionally, regardless of which setups are active (e.g.
+     *       RES_SETUP_ASSIGNMENTS.PRODUCT_COMBINATION).</li>
+     *   <li>Each active {@code SetupConfig}'s own {@code globalFkMappings} -- only
+     *       takes effect for setups that declare it (e.g. RES_ADV_NOTE_TYPE, declared
+     *       on the specific setups that need it).</li>
+     * </ol>
      */
     private static void applyGlobalFkRemappings(
             Collection<SetupConfig> configs,
@@ -306,6 +315,10 @@ public class SetupScriptGenerator {
         if (globalPkMap.isEmpty()) return;
 
         Map<String, Set<String>> mergedFkConfig = new LinkedHashMap<>();
+
+        GlobalBusinessKeyConfig.getAllChildColumnMappings().forEach((childTableColumn, parentTable) ->
+                mergedFkConfig.computeIfAbsent(parentTable, k -> new LinkedHashSet<>()).add(childTableColumn));
+
         for (SetupConfig config : configs) {
             Map<String, Set<String>> configFkMap = config.getGlobalFkMappings();
             if (configFkMap != null && !configFkMap.isEmpty()) {

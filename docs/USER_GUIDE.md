@@ -107,7 +107,7 @@ Neither entry point takes command-line arguments — all file paths are hardcode
 - `input/SourceData.xlsx`, `input/TargetData.xlsx` — the data to compare, one sheet per table
 
 ### What it does
-Once, before any setup runs: aligns any lookup tables registered in `GlobalBusinessKeyConfig` between source and target, then rewrites any `globalFkMappings`-declared columns in the source data to use target-side codes — see [GlobalBusinessKeyConfig + `.globalFkMappings(...)`](#globalbusinesskeyconfig--globalfkmappings---remapping-lookup-table-codes-between-environments).
+Once, before any setup runs: aligns any lookup tables registered in `GlobalBusinessKeyConfig` between source and target, then rewrites the source data's lookup-coded columns — both `GlobalBusinessKeyConfig`'s own globally-declared child mappings and any setup-declared `globalFkMappings` — to use target-side codes — see [GlobalBusinessKeyConfig](#globalbusinesskeyconfig--remapping-lookup-table-codes-between-environments).
 
 Then, for every setup returned by `SetupRegistry.getAllActive()` (see [Choosing which setups run](#choosing-which-setups-run)):
 
@@ -390,7 +390,7 @@ Available builder options:
 | `.targetOnlyOverrides(Map<String, Map<String,Object>>)` | Instead of hard-deleting an orphaned target record, update it with these column values (a soft delete) — e.g. `Map.of("CALC_SCHEME", Map.of("ACTIVE", 0))`. |
 | `.tableOperationExclusions(Map<String, Set<String>>)` | Suppress specific SQL operations (`INSERT`, `UPDATE`, `DELETE`, or `ALL`) for a table, **in every scenario the generator emits SQL for it** — matched-record updates included. See the warning below before using this for a DELETE-only exclusion. |
 | `.orphanDeleteExclusions(Set<String>)` | Spares these tables from physical `DELETE` **only** when removing an orphaned (target-only) record tree — e.g. "disable" a rule by deleting just its `RES_SETUP_ASSIGNMENTS` row instead of the whole rule. Does not affect the delete-then-reinsert refresh of a matched record's children on `UPDATE`. See below. |
-| `.globalFkMappings(Map<String, Set<String>>)` | Declares that a foreign key on a child table (`"ChildTable.Column"`) points at a table registered in `GlobalBusinessKeyConfig`, so its value gets remapped from the source PK to the target PK before syncing. |
+| `.globalFkMappings(Map<String, Set<String>>)` | Declares that a foreign key on a child table (`"ChildTable.Column"`) points at a table registered in `GlobalBusinessKeyConfig`, so its value gets remapped from the source PK to the target PK before syncing — but **only for this setup**. For a mapping that should apply to every run regardless of which setups are active (e.g. a shared child table like `RES_SETUP_ASSIGNMENTS`), register it directly via `GlobalBusinessKeyConfig.registerChildMapping(...)` instead — see [GlobalBusinessKeyConfig](#globalbusinesskeyconfig--remapping-lookup-table-codes-between-environments). |
 | `.enabled(boolean)` | Present on the builder but **not currently checked anywhere** — has no effect. Use `ACTIVE_SETUPS` in `SetupRegistry` to enable/disable a setup instead. |
 
 > **`tableOperationExclusions` vs. `orphanDeleteExclusions` — use the right one.** A `DELETE` entry in `tableOperationExclusions` suppresses that table's `DELETE` statements *everywhere*, including the delete-then-reinsert refresh a matched (`FULL_SYNC`/`UPSERT_ONLY`) record's child rows go through on `UPDATE`. If you put a table there to implement a "disable instead of delete" behavior for orphaned (target-only) records, you will also silently skip the cleanup delete on ordinary updates — the following `INSERT` then fails with a primary-key collision, because the old rows for that record were never removed. Use `orphanDeleteExclusions` instead: it only takes effect for orphan removal (Step 1), so matched-record refreshes on `UPDATE` still delete and reinsert those tables correctly. Reserve `tableOperationExclusions` for tables a setup should *never* touch at all (e.g. `Set.of("ALL")` because another setup, or a separate process, owns them).
@@ -406,34 +406,29 @@ CREATED_BY → 'codegen'
 ```
 To point these at a different user ID or change the environment tag, edit this file directly.
 
-### `GlobalBusinessKeyConfig` + `.globalFkMappings(...)` — remapping lookup-table codes between environments
+### `GlobalBusinessKeyConfig` — remapping lookup-table codes between environments
 
 Some columns hold a raw numeric code from a lookup/reference table (e.g. `RES_SETUP_ASSIGNMENTS.PRODUCT_COMBINATION`, referencing `PRODUCT_COMBINATION.COMBINATION_ID`) where **the ID for the same logical value differs between environments** — e.g. `CAR` is `COMBINATION_ID = 3` in source but `4` in target. This is usually *not* a declared foreign key (check `fk.xlsx` — there's no row for it), so nothing else in the tool knows to remap it, and copying the source code straight into target would silently point at the wrong thing.
 
-[`GlobalBusinessKeyConfig.java`](../src/main/java/com/strongcentsit/scriptcreator/config/GlobalBusinessKeyConfig.java) plus a setup's `.globalFkMappings(...)` builder option together solve this generically for any lookup table, any child column:
+[`GlobalBusinessKeyConfig.java`](../src/main/java/com/strongcentsit/scriptcreator/config/GlobalBusinessKeyConfig.java) solves this generically, entirely from its own registry — no per-setup declaration needed:
 
 ```java
-// 1. GlobalBusinessKeyConfig.java — register the lookup table once, globally,
-//    with the column that identifies "the same value" across environments:
+// 1. Register the lookup table, with the column that identifies "the same value" across environments:
 register("PRODUCT_COMBINATION", List.of("NAME"));
 
-// 2. Any setup whose generated SQL writes to the child column declares the mapping:
-.globalFkMappings(Map.of(
-    "PRODUCT_COMBINATION", Set.of("RES_SETUP_ASSIGNMENTS.PRODUCT_COMBINATION")
-))
+// 2. Declare which child table/column holds a code from it:
+registerChildMapping("RES_SETUP_ASSIGNMENTS", "PRODUCT_COMBINATION", "PRODUCT_COMBINATION");
 ```
 
-What this does, before any setup's SQL is generated:
+What this does, once per run, before any setup's SQL is generated (`SetupScriptGenerator.generateAllSetups`'s pre-pass):
 1. Matches every source `PRODUCT_COMBINATION` row to a target row by `NAME`, building a `sourceCOMBINATION_ID → targetCOMBINATION_ID` map (e.g. `3 → 4` for `CAR`).
 2. Rewrites `RES_SETUP_ASSIGNMENTS.PRODUCT_COMBINATION` in the **in-memory source data** for every row where the current value has a match in that map — before any setup reads it.
 
-This mutation happens once per run against the shared source data (not per setup), so it's enough to declare `.globalFkMappings(...)` on *any one* active setup that touches the child table — but since `RES_SETUP_ASSIGNMENTS` is shared across `Finance - Deposit Rules`, `Finance - Amd Cnx rules`, and `Finance - Option Rules` (confirmed via `fk.xlsx`: those are the only three main tables with an FK into it), and any of them can run alone depending on `ACTIVE_SETUPS`, the mapping is declared on **all three** so the remap always happens regardless of which subset is active.
-
-This was originally built for `RES_ADV_NOTE_TYPE` (business key `DESCRIPTION`, used by `Reservation - Advisory notes` / `Reservation - Rule Expression`) and is fully generic — `PRODUCT_COMBINATION` reuses the exact same mechanism, no code changes.
+Because both steps run against `GlobalBusinessKeyConfig`'s own registry, this applies **unconditionally to the whole batch** — it doesn't matter which setups are active in `ACTIVE_SETUPS`, or whether any of them individually "know about" the mapping. That's different from `SetupConfig`'s own `.globalFkMappings(...)` builder option (still used by `RES_ADV_NOTE_TYPE`, on `Reservation - Advisory notes` / `Reservation - Rule Expression`): that mechanism only takes effect for the specific setups that declare it, useful when a mapping is genuinely setup-specific rather than a blanket rule for a shared child table like `RES_SETUP_ASSIGNMENTS`.
 
 **Prerequisite:** the lookup table needs the same three things as any table this tool touches — a primary key in `pk.xlsx` (`PRODUCT_COMBINATION` / `COMBINATION_ID`), an entry in `columns.xlsx` (`COMBINATION_ID`, `NAME`), and a `PRODUCT_COMBINATION` sheet in both `SourceData.xlsx` and `TargetData.xlsx`. None of these currently exist in this project's `input/` files — until they're added, `alignSourcePrimaryKeysWithTarget` finds no source/target rows for `PRODUCT_COMBINATION` and silently skips the remap (no error, no crash — but also no remapping). See [Regenerating the metadata files from Oracle](#regenerating-the-metadata-files-from-oracle) for how to pull this from Oracle.
 
-**To remap another lookup-coded column** (e.g. `RES_SETUP_ASSIGNMENTS.MARKETED_AS`, which *is* a declared FK to `EXPERIENCE_TYPE.EXP_TYPE_ID` per `fk.xlsx`, and could have the same cross-environment ID drift): register the lookup table in `GlobalBusinessKeyConfig` with whichever column uniquely identifies a row across environments, then add a `.globalFkMappings(...)` entry to every setup whose generated SQL writes to that child column.
+**To remap another lookup-coded column** (e.g. `RES_SETUP_ASSIGNMENTS.MARKETED_AS`, which *is* a declared FK to `EXPERIENCE_TYPE.EXP_TYPE_ID` per `fk.xlsx`, and could have the same cross-environment ID drift): register the lookup table with `register(...)`, then add one `registerChildMapping(childTable, childColumn, parentTable)` call — no need to touch `SetupRegistry.java` at all, since this applies globally regardless of which setups run.
 
 ### `TableNameMapper`
 [`TableNameMapper.java`](../src/main/java/com/strongcentsit/scriptcreator/config/TableNameMapper.java) — maps a truncated Excel sheet name to its real table name, for tables whose name exceeds Excel's 31-character sheet-name limit. Register a new mapping here if you add a long-named table and the automatic fuzzy-matching (see [Input files](#input-files)) doesn't resolve it correctly.
@@ -473,6 +468,8 @@ A sequence only appears in `Sequence_update.sql` if a setup in that run actually
 
 All 24 setups currently registered in `SetupRegistry`, in registration order. Only the ones listed in `ACTIVE_SETUPS` (see next section) are actually generated on a given run.
 
+> Setups 6–8 (`Finance - Amd Cnx rules`, `Finance - Deposit Rules`, `Finance - Option Rules`) share `RES_SETUP_ASSIGNMENTS` as a child table. Its `PRODUCT_COMBINATION` column gets its codes remapped to target and its own `ASSIGNMENT_ID` gets a freshly allocated value (not shown per-row below since neither is declared on these setups individually — both apply globally regardless of which setups are active; see [GlobalBusinessKeyConfig](#globalbusinesskeyconfig--remapping-lookup-table-codes-between-environments) and [SequenceConfig](#sequenceconfig-child-record-id-allocation-and-sequence_updatesql)).
+
 | # | Setup Name | Main Table | Sync Mode | Notes |
 |---|---|---|---|---|
 | 1 | Accounts - Single Use CC Eligibility | `SUCC_ELIGIBILITY_RULE` | FULL_SYNC | |
@@ -480,9 +477,9 @@ All 24 setups currently registered in `SetupRegistry`, in registration order. On
 | 3 | Finance - Rounding Rules Setup | `ROUNDING_RULE` | FULL_SYNC | |
 | 4 | Reservation - Tolerance setup | `RATE_TOLERANCE_RULE` | FULL_SYNC | |
 | 5 | Finance - Local Fee Schemes | `CALC_SCHEME` | FULL_SYNC | Orphans soft-deleted (`ACTIVE=0`) |
-| 6 | Finance - Amd Cnx rules | `RES_AMDCNX_RULE` | FULL_SYNC | New IDs start at 1800; orphans disabled via assignment removal on 3 tables (`orphanDeleteExclusions`); `RES_SETUP_ASSIGNMENTS.PRODUCT_COMBINATION` codes remapped to target (`globalFkMappings`) |
-| 7 | Finance - Deposit Rules | `RES_DEPOSIT_RULE` | FULL_SYNC | New IDs start at 1900; orphans disabled via assignment removal on 3 tables (`orphanDeleteExclusions`); `RES_SETUP_ASSIGNMENTS.PRODUCT_COMBINATION` codes remapped to target (`globalFkMappings`) |
-| 8 | Finance - Option Rules | `RES_OPTION_RULE` | FULL_SYNC | New IDs start at 1300; orphans disabled via assignment removal on 2 tables (`orphanDeleteExclusions`); `RES_SETUP_ASSIGNMENTS.PRODUCT_COMBINATION` codes remapped to target (`globalFkMappings`) |
+| 6 | Finance - Amd Cnx rules | `RES_AMDCNX_RULE` | FULL_SYNC | New IDs start at 1800; orphans disabled via assignment removal on 3 tables (`orphanDeleteExclusions`) |
+| 7 | Finance - Deposit Rules | `RES_DEPOSIT_RULE` | FULL_SYNC | New IDs start at 1900; orphans disabled via assignment removal on 3 tables (`orphanDeleteExclusions`) |
+| 8 | Finance - Option Rules | `RES_OPTION_RULE` | FULL_SYNC | New IDs start at 1300; orphans disabled via assignment removal on 2 tables (`orphanDeleteExclusions`) |
 | 9 | Calculation Scheme - Type X | `CALC_SCHEME` | FULL_SYNC | |
 | 10 | H2H setup - H2H Board Basis Mapping | `H2H_SUP_BOARD_BASIS_MAPPING` | FULL_SYNC | |
 | 11 | Markup - Rates | `MARKUP_VERSION` | FULL_SYNC | New IDs start at 68900; orphans soft-deleted |
@@ -537,7 +534,7 @@ private static final Set<String> ACTIVE_SETUPS = Set.of(
 - **`mvn exec:java` fails to find a main class** — pass it explicitly, e.g. `-Dexec.mainClass=com.strongcentsit.scriptcreator.promo.PromoQueueGeneratorApp`, or run from an IDE instead (see [Running the tool](#running-the-tool)).
 - **Generated `UPDATE EXISTING RECORD` block deletes a child table's rows fine but then fails to re-insert them (unique/primary-key constraint violation)** — a table listed in `.tableOperationExclusions(..., Set.of("DELETE"))` was meant to be spared only when *removing an orphaned (target-only) record*, but that exclusion also suppresses the delete-then-reinsert refresh a matched record's children go through on `UPDATE`, so stale rows are left behind before the `INSERT` runs. Move that table from `.tableOperationExclusions` to `.orphanDeleteExclusions` instead — see the warning under [Configuration reference](#configuration-reference). This was the root cause of exactly this failure in the `Finance - Deposit Rules` / `Finance - Amd Cnx rules` / `Finance - Option Rules` setups and has been fixed by switching them to `orphanDeleteExclusions`.
 - **`Sequence_update.sql` wasn't generated, or is missing a sequence you expected** — it's only written if at least one configured sequence's table was touched by a setup in that run; check the table is registered in `SequenceConfig` and that a setup touching it was actually in `ACTIVE_SETUPS`. See [SequenceConfig and Sequence_update.sql](#sequenceconfig-child-record-id-allocation-and-sequence_updatesql).
-- **Running the generated SQL, a value in a lookup-coded column (e.g. `PRODUCT_COMBINATION`) ends up pointing at the wrong thing in target** — the remap only activates once the lookup table has a PK in `pk.xlsx`, an entry in `columns.xlsx`, and a same-named sheet in both `SourceData.xlsx`/`TargetData.xlsx`; missing any of those, `alignSourcePrimaryKeysWithTarget` silently finds no rows to match and skips the remap without an error. See the prerequisite note under [GlobalBusinessKeyConfig + `.globalFkMappings(...)`](#globalbusinesskeyconfig--globalfkmappings---remapping-lookup-table-codes-between-environments).
+- **Running the generated SQL, a value in a lookup-coded column (e.g. `PRODUCT_COMBINATION`) ends up pointing at the wrong thing in target** — the remap only activates once the lookup table has a PK in `pk.xlsx`, an entry in `columns.xlsx`, and a same-named sheet in both `SourceData.xlsx`/`TargetData.xlsx`; missing any of those, `alignSourcePrimaryKeysWithTarget` silently finds no rows to match and skips the remap without an error. See the prerequisite note under [GlobalBusinessKeyConfig](#globalbusinesskeyconfig--remapping-lookup-table-codes-between-environments).
 
 ## Known limitations / dead code
 
