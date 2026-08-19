@@ -10,7 +10,7 @@ For a full walkthrough of every feature, every input file format, and how to add
 
 - **Setup Script Generator** (`SetupScriptGeneratorApp`) — the tool's main feature. Diffs a source dataset against a target dataset (both exported to Excel) for ~24 pre-registered business "setups", and generates:
   - an `INSERT`/`UPDATE`/`DELETE` script per setup
-  - a matching `_VALIDATE.sql` script — the same DML with no trigger `DISABLE`/`ENABLE` and no `COMMIT`, for reviewing before running the real thing
+  - a matching `_VALIDATE.sql` script — the same DML with no trigger `DISABLE`/`ENABLE` and no `COMMIT` (ends with `ROLLBACK;` instead, so it's safe to run as-is), for reviewing before running the real thing
   - a matching `_BACKUP.sql` script (snapshot the affected tables before running the main script)
   - a matching `_ROLLBACK.sql` script (restore from the backup and undo the change)
   - one combined `Sequence_update.sql` per run, restarting every configured Oracle sequence past whatever the run inserted

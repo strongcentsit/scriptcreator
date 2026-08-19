@@ -482,9 +482,9 @@ public class SetupScriptGenerator {
 
     /**
      * Header + the exact same DML, with no trigger DISABLE/ENABLE and no COMMIT — meant to
-     * be reviewed (or run inside a transaction you intend to roll back) before running the
-     * corresponding main script. Since no COMMIT is emitted, the session is left with an
-     * open transaction; roll it back (or just disconnect) once you're done reviewing.
+     * be reviewed before running the corresponding main script. Ends with an explicit
+     * ROLLBACK so the script is self-contained: running it end to end always leaves the
+     * target data exactly as it was, regardless of what the DML above did.
      */
     private static String buildValidationScript(SetupConfig config, String dmlSql) {
         StringBuilder sb = new StringBuilder();
@@ -494,9 +494,10 @@ public class SetupScriptGenerator {
                 .append("-- ======================================================================\n")
                 .append("-- Review this against the target data before running the accompanying\n")
                 .append("-- main .sql script (which disables/re-enables triggers and commits).\n")
-                .append("-- This script never commits -- roll back the transaction (or just\n")
-                .append("-- disconnect) once you're done reviewing.\n\n");
+                .append("-- Ends with an explicit ROLLBACK, so running this end to end never\n")
+                .append("-- actually changes anything.\n\n");
         sb.append(dmlSql);
+        sb.append("\nROLLBACK;\n");
         return sb.toString();
     }
 
