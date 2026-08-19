@@ -78,19 +78,20 @@ public class SetupScriptGenerator {
         Map<Map<String, Object>, Map<String, Object>> targetToSource = DataQueryUtils.matchEntries(
                 targetEntries, sourceEntries, config.getBusinessKeyColumns(), targetDataMap, sourceDataMap, metadataMap, config.getMainTable());
 
-        StringBuilder mainSqlBuilder = new StringBuilder();
+        // DML only -- no header, no trigger toggling, no commit. writeGeneratedFiles wraps
+        // this into both the full script (header + trigger disable/enable + commit) and
+        // the validation script (header + this DML only) from the exact same content, so
+        // neither variant can drift from the other and nothing gets generated twice (which
+        // would double-allocate sequence-backed IDs).
+        StringBuilder dmlSqlBuilder = new StringBuilder();
         Set<String> affectedTables = new LinkedHashSet<>();
         affectedTables.add(config.getMainTable());
-
-        appendHeader(mainSqlBuilder, config);
 
         preCollectAffectedTables(config, sourceEntries, targetEntries, sourceDataMap, targetDataMap, metadataMap, affectedTables);
 
         if (sequenceTracker != null) sequenceTracker.seedForTables(affectedTables, targetDataMap);
 
-        // Collect and disable triggers
         List<String> triggersToToggle = collectTriggersForTables(affectedTables, metadataMap);
-        appendDisableTriggersSection(mainSqlBuilder, triggersToToggle);
 
         // =====================================================================
         // MODE: INSERT_MISSING_ONLY (Flat Single-Table Sync, Original PKs Preserved)
@@ -103,11 +104,11 @@ public class SetupScriptGenerator {
                 Map<String, Object> targetRow = entry.getValue();
 
                 if (targetRow == null) {
-                    mainSqlBuilder.append("-- --- INSERT MISSING RECORD: ")
+                    dmlSqlBuilder.append("-- --- INSERT MISSING RECORD: ")
                             .append(buildKeySummary(sourceRow, config, sourceDataMap, metadataMap))
                             .append(" ---\n");
 
-                    mainSqlBuilder.append(SqlScriptUtils.generateFlatInsertScript(
+                    dmlSqlBuilder.append(SqlScriptUtils.generateFlatInsertScript(
                             config.getMainTable(), sourceRow, config, sequenceTracker));
                     missingCount++;
                 }
@@ -116,8 +117,7 @@ public class SetupScriptGenerator {
             System.out.printf("  [INSERT_MISSING_ONLY] Setup '%s' (%s): Generated %d insert statements.\n",
                     config.getSetupName(), config.getMainTable(), missingCount);
 
-            appendEnableTriggersSection(mainSqlBuilder, triggersToToggle);
-            writeGeneratedFiles(outputFolderPath, config, mainSqlBuilder.toString(), affectedTables);
+            writeGeneratedFiles(outputFolderPath, config, dmlSqlBuilder.toString(), triggersToToggle, affectedTables);
             return;
         }
 
@@ -130,20 +130,20 @@ public class SetupScriptGenerator {
                     Map<String, Object> targetOnlyProps = config.getTargetOnlyOverridesForTable(config.getMainTable());
 
                     if (!targetOnlyProps.isEmpty()) {
-                        mainSqlBuilder.append("-- --- [1] DEACTIVATE / UPDATE REMOVED RECORD (Target Only): ")
+                        dmlSqlBuilder.append("-- --- [1] DEACTIVATE / UPDATE REMOVED RECORD (Target Only): ")
                                 .append(buildKeySummary(targetRow, config, targetDataMap, metadataMap)).append(" ---\n");
 
                         List<EntityNode> targetTrees = DataQueryUtils.getNestedTree(targetDataMap, List.of(targetRow), metadataMap, config.getMainTable());
                         if (!targetTrees.isEmpty()) {
-                            mainSqlBuilder.append(SqlScriptUtils.generateTargetOnlyUpdateScript(targetTrees.get(0), metadataMap, targetOnlyProps, config));
+                            dmlSqlBuilder.append(SqlScriptUtils.generateTargetOnlyUpdateScript(targetTrees.get(0), metadataMap, targetOnlyProps, config));
                         }
                     } else {
-                        mainSqlBuilder.append("-- --- [1] DELETE REMOVED RECORD (Target Only): ")
+                        dmlSqlBuilder.append("-- --- [1] DELETE REMOVED RECORD (Target Only): ")
                                 .append(buildKeySummary(targetRow, config, targetDataMap, metadataMap)).append(" ---\n");
 
                         List<EntityNode> targetTrees = DataQueryUtils.getNestedTree(targetDataMap, List.of(targetRow), metadataMap, config.getMainTable());
                         if (!targetTrees.isEmpty()) {
-                            mainSqlBuilder.append(SqlScriptUtils.generateOrphanDeleteScript(targetTrees.get(0), metadataMap, config));
+                            dmlSqlBuilder.append(SqlScriptUtils.generateOrphanDeleteScript(targetTrees.get(0), metadataMap, config));
                         }
                     }
                 }
@@ -151,8 +151,7 @@ public class SetupScriptGenerator {
         }
 
         if (config.getSyncMode() == SyncMode.DELETE_ORPHANS_ONLY) {
-            appendEnableTriggersSection(mainSqlBuilder, triggersToToggle);
-            writeGeneratedFiles(outputFolderPath, config, mainSqlBuilder.toString(), affectedTables);
+            writeGeneratedFiles(outputFolderPath, config, dmlSqlBuilder.toString(), triggersToToggle, affectedTables);
             return;
         }
 
@@ -168,7 +167,7 @@ public class SetupScriptGenerator {
                 Object originalSourcePk = sourceRow.get(pkColumn);
                 Object targetPkValue = targetRow.get(pkColumn);
 
-                mainSqlBuilder.append("-- --- [2] UPDATE EXISTING RECORD: ")
+                dmlSqlBuilder.append("-- --- [2] UPDATE EXISTING RECORD: ")
                         .append(buildKeySummary(sourceRow, config, sourceDataMap, metadataMap))
                         .append(" (Target PK: ").append(targetPkValue).append(") ---\n");
 
@@ -177,7 +176,7 @@ public class SetupScriptGenerator {
                     EntityNode targetTree = targetTrees.get(0);
                     targetTree.getChildrenMap().forEach((childTable, childNodes) -> {
                         for (EntityNode child : childNodes) {
-                            mainSqlBuilder.append(SqlScriptUtils.generateDeleteScript(child, metadataMap, config));
+                            dmlSqlBuilder.append(SqlScriptUtils.generateDeleteScript(child, metadataMap, config));
                         }
                     });
                 }
@@ -190,11 +189,11 @@ public class SetupScriptGenerator {
                     remappedMainData.put(pkColumn, targetPkValue);
                     EntityNode remappedMainNode = new EntityNode(config.getMainTable(), remappedMainData);
 
-                    mainSqlBuilder.append(SqlScriptUtils.generateUpdateScript(remappedMainNode, metadataMap, config));
+                    dmlSqlBuilder.append(SqlScriptUtils.generateUpdateScript(remappedMainNode, metadataMap, config));
 
                     sourceTree.getChildrenMap().forEach((childTable, childNodes) -> {
                         for (EntityNode child : childNodes) {
-                            remapAndInsertChild(child, pkColumn, originalSourcePk, targetPkValue, Map.of(), mainSqlBuilder, config, sequenceTracker, metadataMap);
+                            remapAndInsertChild(child, pkColumn, originalSourcePk, targetPkValue, Map.of(), dmlSqlBuilder, config, sequenceTracker, metadataMap);
                         }
                     });
                 }
@@ -205,7 +204,7 @@ public class SetupScriptGenerator {
                 maxId++;
                 Object newPkValue = maxId;
 
-                mainSqlBuilder.append("-- --- [3] INSERT NEW RECORD: ")
+                dmlSqlBuilder.append("-- --- [3] INSERT NEW RECORD: ")
                         .append(buildKeySummary(sourceRow, config, sourceDataMap, metadataMap))
                         .append(" (Assigned New PK: ").append(newPkValue).append(") ---\n");
 
@@ -217,19 +216,18 @@ public class SetupScriptGenerator {
                     newMainData.put(pkColumn, newPkValue);
                     EntityNode newMainNode = new EntityNode(config.getMainTable(), newMainData);
 
-                    mainSqlBuilder.append(SqlScriptUtils.generateInsertScript(newMainNode, config, sequenceTracker));
+                    dmlSqlBuilder.append(SqlScriptUtils.generateInsertScript(newMainNode, config, sequenceTracker));
 
                     sourceTree.getChildrenMap().forEach((childTable, childNodes) -> {
                         for (EntityNode child : childNodes) {
-                            remapAndInsertChild(child, pkColumn, originalSourcePk, newPkValue, Map.of(), mainSqlBuilder, config, sequenceTracker, metadataMap);
+                            remapAndInsertChild(child, pkColumn, originalSourcePk, newPkValue, Map.of(), dmlSqlBuilder, config, sequenceTracker, metadataMap);
                         }
                     });
                 }
             }
         }
 
-        appendEnableTriggersSection(mainSqlBuilder, triggersToToggle);
-        writeGeneratedFiles(outputFolderPath, config, mainSqlBuilder.toString(), affectedTables);
+        writeGeneratedFiles(outputFolderPath, config, dmlSqlBuilder.toString(), triggersToToggle, affectedTables);
     }
 
     // =========================================================================
@@ -450,7 +448,8 @@ public class SetupScriptGenerator {
     private static void writeGeneratedFiles(
             String outputFolderPath,
             SetupConfig config,
-            String mainScriptSql,
+            String dmlSql,
+            List<String> triggersToToggle,
             Set<String> affectedTables) {
 
         String baseFileName = config.getOutputFileName();
@@ -458,13 +457,47 @@ public class SetupScriptGenerator {
             baseFileName = baseFileName.substring(0, baseFileName.length() - 4);
         }
 
+        String mainScriptSql = buildMainScript(config, dmlSql, triggersToToggle);
         writeSqlToFile(outputFolderPath, baseFileName + ".sql", mainScriptSql);
+
+        String validateSql = buildValidationScript(config, dmlSql);
+        writeSqlToFile(outputFolderPath, baseFileName + "_VALIDATE.sql", validateSql);
 
         String backupSql = buildBackupScript(config, affectedTables);
         writeSqlToFile(outputFolderPath, baseFileName + "_BACKUP.sql", backupSql);
 
         String rollbackSql = buildRollbackScript(config, affectedTables);
         writeSqlToFile(outputFolderPath, baseFileName + "_ROLLBACK.sql", rollbackSql);
+    }
+
+    /** Header + trigger DISABLE + the DML + trigger ENABLE/COMMIT — the script that actually applies the change. */
+    private static String buildMainScript(SetupConfig config, String dmlSql, List<String> triggersToToggle) {
+        StringBuilder sb = new StringBuilder();
+        appendHeader(sb, config);
+        appendDisableTriggersSection(sb, triggersToToggle);
+        sb.append(dmlSql);
+        appendEnableTriggersSection(sb, triggersToToggle);
+        return sb.toString();
+    }
+
+    /**
+     * Header + the exact same DML, with no trigger DISABLE/ENABLE and no COMMIT — meant to
+     * be reviewed (or run inside a transaction you intend to roll back) before running the
+     * corresponding main script. Since no COMMIT is emitted, the session is left with an
+     * open transaction; roll it back (or just disconnect) once you're done reviewing.
+     */
+    private static String buildValidationScript(SetupConfig config, String dmlSql) {
+        StringBuilder sb = new StringBuilder();
+        appendHeader(sb, config);
+        sb.append("-- ======================================================================\n")
+                .append("--   VALIDATION SCRIPT -- NO TRIGGER DISABLE/ENABLE, NO COMMIT           \n")
+                .append("-- ======================================================================\n")
+                .append("-- Review this against the target data before running the accompanying\n")
+                .append("-- main .sql script (which disables/re-enables triggers and commits).\n")
+                .append("-- This script never commits -- roll back the transaction (or just\n")
+                .append("-- disconnect) once you're done reviewing.\n\n");
+        sb.append(dmlSql);
+        return sb.toString();
     }
 
     /**

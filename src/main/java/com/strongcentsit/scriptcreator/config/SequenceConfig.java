@@ -28,6 +28,7 @@ public class SequenceConfig {
         register("RES_SETUP_ASSIGNMENTS", "ASSIGNMENT_ID", "RES_ASSIGNMENT_ID");
         register("RES_AMDCNX_RULE", "RULE_ID", "RES_AMDCNX_RULE_ID");
         register("RES_DEPOSIT_RULE", "RULE_ID", "RES_DEPOSIT_RULE_ID");
+        register("RES_OPTION_RULE", "RULE_ID", "RES_OPTION_RULE_ID");
     }
 
     private SequenceConfig() {}

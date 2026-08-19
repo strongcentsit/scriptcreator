@@ -118,9 +118,9 @@ Then, for every setup returned by `SetupRegistry.getAllActive()` (see [Choosing 
    - Inserts unmatched source records (assigning new sequential IDs),
    - Deletes or soft-deletes target records with no matching source record.
 4. Recursively applies the same logic to related child-table records (found by walking foreign keys), so a setup's "child rows" get synced along with its main row. A child record's own primary key is normally carried through from source unchanged, *unless* it's registered in [`SequenceConfig`](#sequenceconfig-child-record-id-allocation-and-sequence_updatesql) — in which case it gets a freshly allocated ID instead, to avoid colliding with an unrelated row that happens to share the same source ID in target.
-5. Wraps the whole script in `ALTER TRIGGER ... DISABLE` / `ENABLE` statements for any enabled trigger on an affected table, so business-rule triggers don't fire while the script runs.
+5. Wraps the main script's DML in `ALTER TRIGGER ... DISABLE` / `ENABLE` statements for any enabled trigger on an affected table, so business-rule triggers don't fire while the script runs — the companion `_VALIDATE.sql` skips this wrapping entirely (see step 7).
 6. Applies a global set of column overrides to every insert/update — audit columns like `CREATED_BY`, `LAST_MODIFIED_DATE`, etc. are always set to fixed values (`codegen`, `SYSDATE`) rather than copied from source. See [ColumnOverrideConfig](#columnoverrideconfig).
-7. Writes three files per setup into `output/` (see [Output files](#output-files)).
+7. Writes four files per setup into `output/` (see [Output files](#output-files)): the main script, a `_VALIDATE.sql` twin with no trigger toggling and no `COMMIT` (for reviewing the DML before running it for real), a `_BACKUP.sql`, and a `_ROLLBACK.sql`.
 
 After every setup in the run has been processed: writes one combined `output/Sequence_update.sql` restarting every [`SequenceConfig`](#sequenceconfig-child-record-id-allocation-and-sequence_updatesql)-registered sequence whose table was touched, past the highest value the run inserted.
 
@@ -337,21 +337,24 @@ ORDER BY table_name, trigger_name;
 
 ## Output files
 
-**Setup pipeline** (`SetupScriptGeneratorApp`) writes into `output/` (created automatically), three files per active setup:
+**Setup pipeline** (`SetupScriptGeneratorApp`) writes into `output/` (created automatically), four files per active setup:
 
 | File | Purpose |
 |---|---|
-| `<Setup_Name>.sql` | The actual sync script — run this to apply the change. |
-| `<Setup_Name>_BACKUP.sql` | Run this **first**. Creates `B_<table>` backup tables (`CREATE TABLE ... AS SELECT * FROM ...`) for every table the main script touches. |
+| `<Setup_Name>.sql` | The actual sync script — run this to apply the change. Wraps the DML in `ALTER TRIGGER ... DISABLE`/`ENABLE` and ends with `COMMIT;`. |
+| `<Setup_Name>_VALIDATE.sql` | The exact same DML as the main script, with the trigger `DISABLE`/`ENABLE` statements and the `COMMIT` removed. Run this first, in a session you're prepared to roll back, to review the actual `INSERT`/`UPDATE`/`DELETE` statements against the target data before running the main script for real. Since it never commits, roll back (or just disconnect) the session once you're done reviewing. |
+| `<Setup_Name>_BACKUP.sql` | Run this **first**, before the main script. Creates `B_<table>` backup tables (`CREATE TABLE ... AS SELECT * FROM ...`) for every table the main script touches. |
 | `<Setup_Name>_ROLLBACK.sql` | Run this only if you need to undo the main script. Restores every affected table from its `B_<table>` backup, then drops the backup tables. |
 
-Setup names are sanitized into filenames by replacing anything that isn't a letter, digit, `-`, or `_` with `_` — e.g. `"Finance - Local Fee Schemes"` → `Finance_-_Local_Fee_Schemes.sql`.
+Both `<Setup_Name>.sql` and `<Setup_Name>_VALIDATE.sql` are built from the exact same generated DML — one script isn't regenerated separately from the other, so they can never drift apart or double-allocate a sequence-backed ID (see [SequenceConfig](#sequenceconfig-child-record-id-allocation-and-sequence_updatesql)) by being computed twice.
+
+Setup names are sanitized into filenames by replacing anything that isn't a letter, digit, `-`, or `_` with `_` — e.g. `"Finance - Local Fee Schemes"` → `Finance_-_Local_Fee_Schemes.sql` / `Finance_-_Local_Fee_Schemes_VALIDATE.sql`.
 
 If any table with a sequence registered in [`SequenceConfig`](#sequenceconfig-child-record-id-allocation-and-sequence_updatesql) was touched by *any* setup in this run, one more file is written **once per run** (not per setup): `Sequence_update.sql`, restarting each affected sequence past every value the run inserted. See [SequenceConfig and Sequence_update.sql](#sequenceconfig-child-record-id-allocation-and-sequence_updatesql) below.
 
-**Promo pipeline** writes a single file: `output/promo/generated_promo_queue_inserts.sql` (no backup/rollback).
+**Promo pipeline** writes a single file: `output/promo/generated_promo_queue_inserts.sql` (no backup/rollback/validate).
 
-> **Recommended run order:** review the `_BACKUP.sql` files, run them → review the main `.sql` files, run them → run `Sequence_update.sql` → keep the `_ROLLBACK.sql` files on hand in case you need to revert.
+> **Recommended run order:** review the `_BACKUP.sql` files, run them → review and run the `_VALIDATE.sql` files inside a transaction you roll back once satisfied → review the main `.sql` files, run them for real → run `Sequence_update.sql` → keep the `_ROLLBACK.sql` files on hand in case you need to revert.
 
 `output/` (like `input/`) is gitignored, so generated SQL never gets committed to this repo — treat it as local/disposable and copy anything you need to keep elsewhere before re-running the generator.
 

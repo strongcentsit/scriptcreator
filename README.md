@@ -10,6 +10,7 @@ For a full walkthrough of every feature, every input file format, and how to add
 
 - **Setup Script Generator** (`SetupScriptGeneratorApp`) — the tool's main feature. Diffs a source dataset against a target dataset (both exported to Excel) for ~24 pre-registered business "setups", and generates:
   - an `INSERT`/`UPDATE`/`DELETE` script per setup
+  - a matching `_VALIDATE.sql` script — the same DML with no trigger `DISABLE`/`ENABLE` and no `COMMIT`, for reviewing before running the real thing
   - a matching `_BACKUP.sql` script (snapshot the affected tables before running the main script)
   - a matching `_ROLLBACK.sql` script (restore from the backup and undo the change)
   - one combined `Sequence_update.sql` per run, restarting every configured Oracle sequence past whatever the run inserted
@@ -39,7 +40,7 @@ See the [User Guide](docs/USER_GUIDE.md) for the complete list of registered set
    mvn compile exec:java
    ```
    (this runs `SetupScriptGeneratorApp` by default — see the [User Guide](docs/USER_GUIDE.md#running-the-tool) for running the promo generator instead, or running from an IDE).
-5. Find the generated `.sql`, `_BACKUP.sql`, and `_ROLLBACK.sql` files in `output/`.
+5. Find the generated `.sql`, `_VALIDATE.sql`, `_BACKUP.sql`, and `_ROLLBACK.sql` files in `output/`.
 
 `input/` and `output/` are gitignored — they hold local data and generated artifacts and are never committed.
 
