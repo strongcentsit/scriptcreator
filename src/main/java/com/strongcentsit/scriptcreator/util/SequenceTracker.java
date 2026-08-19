@@ -52,6 +52,25 @@ public class SequenceTracker {
         maxValueBySequence.merge(sequenceName, numeric, Math::max);
     }
 
+    /**
+     * Allocates a fresh value for the sequence backing (table, column) -- one past
+     * whatever's the highest value seen for it so far, whether that's existing target
+     * data (via {@link #seedForTables}) or another value already observed/allocated
+     * earlier in this same run -- and remembers it as the new running max, so the next
+     * allocation (for this or any other row sharing the sequence) starts past it too.
+     * Returns null if no sequence is configured for (table, column); callers should
+     * fall back to their normal behavior (e.g. copying the source value through) in
+     * that case.
+     */
+    public Long nextValue(String table, String column) {
+        String sequenceName = SequenceConfig.getSequenceName(table, column);
+        if (sequenceName == null) return null;
+
+        long next = maxValueBySequence.getOrDefault(sequenceName, 0L) + 1;
+        maxValueBySequence.put(sequenceName, next);
+        return next;
+    }
+
     public boolean isEmpty() {
         return maxValueBySequence.isEmpty();
     }
@@ -65,8 +84,8 @@ public class SequenceTracker {
                 .append("--                      SEQUENCE RESTART SCRIPT                          \n")
                 .append("-- ======================================================================\n")
                 .append("-- Run this AFTER the setup scripts above, so each sequence's NEXTVAL\n")
-                .append("-- can't collide with a value this run inserted (either freshly assigned\n")
-                .append("-- or copied through from source, e.g. RES_SETUP_ASSIGNMENTS.ASSIGNMENT_ID).\n\n");
+                .append("-- can't collide with a value this run inserted -- freshly allocated\n")
+                .append("-- (via SequenceTracker.nextValue) or otherwise written by the generator.\n\n");
 
         for (Map.Entry<String, Long> entry : maxValueBySequence.entrySet()) {
             sb.append("ALTER SEQUENCE ").append(entry.getKey())

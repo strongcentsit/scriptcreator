@@ -194,7 +194,7 @@ public class SetupScriptGenerator {
 
                     sourceTree.getChildrenMap().forEach((childTable, childNodes) -> {
                         for (EntityNode child : childNodes) {
-                            remapAndInsertChild(child, pkColumn, originalSourcePk, targetPkValue, mainSqlBuilder, config, sequenceTracker);
+                            remapAndInsertChild(child, pkColumn, originalSourcePk, targetPkValue, Map.of(), mainSqlBuilder, config, sequenceTracker, metadataMap);
                         }
                     });
                 }
@@ -221,7 +221,7 @@ public class SetupScriptGenerator {
 
                     sourceTree.getChildrenMap().forEach((childTable, childNodes) -> {
                         for (EntityNode child : childNodes) {
-                            remapAndInsertChild(child, pkColumn, originalSourcePk, newPkValue, mainSqlBuilder, config, sequenceTracker);
+                            remapAndInsertChild(child, pkColumn, originalSourcePk, newPkValue, Map.of(), mainSqlBuilder, config, sequenceTracker, metadataMap);
                         }
                     });
                 }
@@ -358,34 +358,80 @@ public class SetupScriptGenerator {
     // HELPER METHODS
     // =========================================================================
 
+    /**
+     * Remaps a source child record onto the (already-known) new/target main-record PK,
+     * inserts it, and recurses into its own children.
+     *
+     * If the child's own table has a primary key column registered in
+     * {@link com.strongcentsit.scriptcreator.config.SequenceConfig}, its source value
+     * (e.g. RES_SETUP_ASSIGNMENTS.ASSIGNMENT_ID, which is otherwise copied straight
+     * through from source -- see the class-level note in SequenceConfig) is replaced
+     * with a freshly allocated one via {@code sequenceTracker.nextValue(...)} instead,
+     * so it can't collide with whatever already exists in the target table. That
+     * old-source-value -> new-value substitution is then carried into {@code
+     * ancestorRemaps} for this node's own descendants, so anything further down the
+     * tree that references it (e.g. a table with a declared FK into it) gets updated
+     * to the new value too -- on top of (not instead of) the original main-record
+     * remap, which keeps applying at every depth exactly as before.
+     */
     private static void remapAndInsertChild(
             EntityNode node,
             String pkColumn,
             Object oldPk,
             Object newPk,
+            Map<Object, Object> ancestorRemaps,
             StringBuilder sql,
             SetupConfig config,
-            SequenceTracker sequenceTracker) {
+            SequenceTracker sequenceTracker,
+            Map<String, TableSchemaMetadata> metadataMap) {
 
         Map<String, Object> remappedData = new LinkedHashMap<>(node.getData());
 
         remappedData.forEach((col, val) -> {
             if (val != null && val.equals(oldPk)) {
                 remappedData.put(col, newPk);
+            } else if (val != null && ancestorRemaps.containsKey(val)) {
+                remappedData.put(col, ancestorRemaps.get(val));
             }
             if (col.equalsIgnoreCase(pkColumn) || col.equalsIgnoreCase("RULE_ID")) {
                 remappedData.put(col, newPk);
             }
         });
 
-        EntityNode remappedNode = new EntityNode(node.getTableName(), remappedData);
+        String tableName = node.getTableName();
+        Map<Object, Object> childAncestorRemaps = ancestorRemaps;
+
+        if (sequenceTracker != null) {
+            for (String ownPkColumn : getPrimaryKeyColumns(tableName, metadataMap)) {
+                Long allocatedId = sequenceTracker.nextValue(tableName, ownPkColumn);
+                if (allocatedId == null) continue;
+
+                Object previousValue = getCaseInsensitiveValue(remappedData, ownPkColumn);
+                putCaseInsensitiveValue(remappedData, ownPkColumn, allocatedId);
+
+                if (previousValue != null) {
+                    if (childAncestorRemaps == ancestorRemaps) {
+                        childAncestorRemaps = new HashMap<>(ancestorRemaps);
+                    }
+                    childAncestorRemaps.put(previousValue, allocatedId);
+                }
+            }
+        }
+
+        EntityNode remappedNode = new EntityNode(tableName, remappedData);
         sql.append(SqlScriptUtils.generateInsertScript(remappedNode, config, sequenceTracker));
 
+        Map<Object, Object> remapsForChildren = childAncestorRemaps;
         node.getChildrenMap().forEach((childTable, childNodes) -> {
             for (EntityNode child : childNodes) {
-                remapAndInsertChild(child, pkColumn, oldPk, newPk, sql, config, sequenceTracker);
+                remapAndInsertChild(child, pkColumn, oldPk, newPk, remapsForChildren, sql, config, sequenceTracker, metadataMap);
             }
         });
+    }
+
+    private static List<String> getPrimaryKeyColumns(String tableName, Map<String, TableSchemaMetadata> metadataMap) {
+        TableSchemaMetadata meta = metadataMap.get(tableName);
+        return (meta != null) ? meta.getPrimaryKeys() : List.of();
     }
 
     private static void writeGeneratedFiles(
